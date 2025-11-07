@@ -70,6 +70,7 @@ ui <- fluidPage(
                  
                  h4("2) Choose sample columns"),
                  uiOutput("sample_picker"),
+                 uiOutput("unassigned_cols"),
                  tags$hr(),
                  
                  h4("3) Define groups & colors"),
@@ -111,11 +112,20 @@ ui <- fluidPage(
                                    ),
                                    DTOutput("assign_dt")
                           ),
+                          # tabPanel("Visualization preview",
+                          #          br(),
+                          #          helpText("Quick QC: boxplots of top expressed genes using your current group assignments and colors."),
+                          #          uiOutput("viz_gene_ui"),
+                          #          plotlyOutput("viz_plot", height = "420px")
+                          # )
                           tabPanel("Visualization preview",
                                    br(),
-                                   helpText("Quick QC: boxplots of top expressed genes using your current group assignments and colors."),
+                                   helpText("Quick QC: boxplots using your current group assignments and colors."),
                                    uiOutput("viz_gene_ui"),
-                                   plotlyOutput("viz_plot", height = "420px")
+                                   div(
+                                     style = "width:500px; margin:0 auto;",
+                                     plotlyOutput("viz_plot", height = "500px")
+                                   )
                           )
               )
     )
@@ -130,6 +140,21 @@ server <- function(input, output, session){
   raw_df <- reactive({
     req(input$expression_dataframe)
     readr::read_csv(input$expression_dataframe$datapath, show_col_types = FALSE)
+  })
+  
+  sample_choices <- reactive({
+    req(raw_df())
+    df <- raw_df()
+    id_cols  <- input$id_cols %||% infer_id_cols(df)
+    num_cols <- numeric_sample_cols(df, id_cols)
+    
+    # If we have numeric non-ID columns, use those;
+    # otherwise, fall back to all non-ID columns.
+    if (length(num_cols)) {
+      num_cols
+    } else {
+      setdiff(names(df), id_cols)
+    }
   })
   
   # ---- ID columns ----
@@ -152,17 +177,41 @@ server <- function(input, output, session){
   
   # ---- Sample columns ----
   output$sample_picker <- renderUI({
-    req(raw_df())
-    id_cols  <- input$id_cols %||% infer_id_cols(raw_df())
-    num_cols <- numeric_sample_cols(raw_df(), id_cols)
-    choices  <- if (length(num_cols)) num_cols else setdiff(names(raw_df()), id_cols)
-    
+    choices <- sample_choices()
     selectizeInput(
       "sample_cols", "Sample columns",
       choices = choices,
       selected = choices,
       multiple = TRUE,
       options = list(plugins = list("remove_button"))
+    )
+  })
+  
+  output$unassigned_cols <- renderUI({
+    all_choices <- sample_choices()
+    
+    # What is currently selected in the widget?
+    selected <- input$sample_cols
+    if (is.null(selected)) {
+      # Before the user touches anything, everything is "assigned"
+      selected <- all_choices
+    }
+    
+    unused <- setdiff(all_choices, selected)
+    
+    if (!length(unused)) {
+      return(NULL)  # don't show the box if nothing is unassigned
+    }
+    
+    tagList(
+      tags$b("Unassigned columns"),
+      # tags$div(
+      #   paste(unused, collapse = ", "),
+      #   style = "font-size:11px; color:#555; word-wrap:break-word; margin-bottom:8px;"
+      # )
+      tags$ul(
+        lapply(unused, function(x) tags$li(x))
+      )
     )
   })
   
@@ -254,18 +303,6 @@ server <- function(input, output, session){
   assign_df <- reactiveVal(
     tibble(Sample = character(), Group = character(), Color = character())
   )
-  
-  # token_choices <- reactive({
-  #   df <- assign_df()
-  #   req(nrow(df) > 0)
-  #   
-  #   del <- input$token_delim %||% "[_\\.-]+"
-  #   
-  #   toks <- str_split(df$Sample, pattern = del)
-  #   vals <- unique(unlist(toks))
-  #   vals <- vals[!is.na(vals) & vals != ""]
-  #   sort(vals)
-  # })
   
   token_choices <- reactive({
     df <- assign_df()
@@ -469,13 +506,6 @@ server <- function(input, output, session){
       assigned_group[assignable] <- g
     }
     
-    # Optionally drop groups with only a single sample
-    # if (isTRUE(input$token_drop_singletons)) {
-    #   tab <- table(assigned_group)
-    #   keep <- names(tab)[tab > 1]
-    #   assigned_group[!(assigned_group %in% keep)] <- NA_character_
-    # }
-    
     tab <- table(assigned_group)
     keep <- names(tab)[tab > 1]
     assigned_group[!(assigned_group %in% keep)] <- NA_character_
@@ -595,60 +625,147 @@ server <- function(input, output, session){
     df_long
   })
   
-  high_expr_data <- reactive({
-    expr <- expr_long()
-    map  <- final_group_df()
-    
-    df <- expr %>%
-      inner_join(map, by = "Sample") %>%
-      filter(!is.na(Group), !is.na(Color))
-    
-    req(nrow(df) > 0)
-    
-    df$Count <- suppressWarnings(as.numeric(df$Count))
-    
-    top_genes <- df %>%
-      group_by(Gene) %>%
-      summarize(mean_expr = mean(Count, na.rm = TRUE), .groups = "drop") %>%
-      arrange(desc(mean_expr)) %>%
-      slice_head(n = 12) %>%
-      pull(Gene)
-    
-    list(df = df, top_genes = top_genes)
+  # high_expr_data <- reactive({
+  #   expr <- expr_long()
+  #   map  <- final_group_df()
+  #   
+  #   df <- expr %>%
+  #     inner_join(map, by = "Sample") %>%
+  #     filter(!is.na(Group), !is.na(Color))
+  #   
+  #   req(nrow(df) > 0)
+  #   
+  #   df$Count <- suppressWarnings(as.numeric(df$Count))
+  #   
+  #   top_genes <- df %>%
+  #     group_by(Gene) %>%
+  #     summarize(mean_expr = mean(Count, na.rm = TRUE), .groups = "drop") %>%
+  #     arrange(desc(mean_expr)) %>%
+  #     slice_head(n = 12) %>%
+  #     pull(Gene)
+  #   
+  #   list(df = df, top_genes = top_genes)
+  # })
+  
+  viz_gene_choices <- reactive({
+    df_long <- expr_long()
+    genes <- sort(unique(df_long$Gene))
+    genes[!is.na(genes) & genes != ""]
   })
   
   output$viz_gene_ui <- renderUI({
-    he <- high_expr_data()
-    choices <- he$top_genes
+    choices <- viz_gene_choices()
     req(length(choices) > 0)
     
     selectInput(
       "viz_gene",
-      "Choose gene to preview (top expressed):",
+      "Choose gene to preview:",
       choices = choices,
       selected = choices[1]
     )
   })
   
+  # output$viz_gene_ui <- renderUI({
+  #   he <- high_expr_data()
+  #   choices <- he$top_genes
+  #   req(length(choices) > 0)
+  #   
+  #   selectInput(
+  #     "viz_gene",
+  #     "Choose gene to preview (top expressed):",
+  #     choices = choices,
+  #     selected = choices[1]
+  #   )
+  # })
+  
+  # output$viz_plot <- renderPlotly({
+  #   he <- high_expr_data()
+  #   df <- he$df
+  #   req(nrow(df) > 0)
+  #   
+  #   gene <- input$viz_gene %||% he$top_genes[1]
+  #   req(gene)
+  #   
+  #   map <- final_group_df()
+  #   color_map <- setNames(map$Color, map$Group)
+  #   
+  #   gdat <- df %>% filter(Gene == gene)
+  #   req(nrow(gdat) > 0)
+  #   
+  #   groups <- unique(gdat$Group)
+  #   
+  #   p <- plot_ly()
+  #   for (g in groups) {
+  #     sub <- gdat %>% filter(Group == g)
+  #     col <- unname(color_map[g])
+  #     
+  #     hover_txt <- paste0(
+  #       "<b>Sample</b>: ", sub$Sample,
+  #       "<br><b>Group</b>: ", sub$Group,
+  #       "<br><b>Expr</b>: ", signif(sub$Count, 4)
+  #     )
+  #     
+  #     p <- p %>%
+  #       add_trace(
+  #         data = sub,
+  #         x = ~Group,
+  #         y = ~Count,
+  #         type = "box",
+  #         name = g,
+  #         marker = list(color = col),
+  #         line   = list(color = col),
+  #         boxpoints = "all",
+  #         jitter    = 0.3,
+  #         pointpos  = 0,
+  #         text      = hover_txt,
+  #         hoverinfo = "text",
+  #         showlegend = FALSE
+  #       )
+  #   }
+  #   
+  #   p %>%
+  #     layout(
+  #       title = list(
+  #         text = paste0("Expression preview for <b>", gene, "</b>"),
+  #         x = 0
+  #       ),
+  #       xaxis = list(title = ""),
+  #       yaxis = list(
+  #         title = "Expression (units from uploaded file)",
+  #         zeroline = TRUE
+  #       ),
+  #       boxmode = "group",
+  #       margin = list(t = 60, b = 40, l = 60, r = 20)
+  #     )
+  # })
   output$viz_plot <- renderPlotly({
-    he <- high_expr_data()
-    df <- he$df
+    # Long expression data
+    expr <- expr_long()
+    
+    # Current mapping (Sample, Group, Color)
+    map <- final_group_df()
+    req(nrow(map) > 0)
+    
+    # Join to bring in Group/Color only for assigned samples
+    df <- expr %>%
+      inner_join(map, by = "Sample") %>%
+      filter(!is.na(Group), !is.na(Color))
     req(nrow(df) > 0)
     
-    gene <- input$viz_gene %||% he$top_genes[1]
+    # Gene to show
+    gene <- input$viz_gene %||% viz_gene_choices()[1]
     req(gene)
-    
-    map <- final_group_df()
-    color_map <- setNames(map$Color, map$Group)
     
     gdat <- df %>% filter(Gene == gene)
     req(nrow(gdat) > 0)
     
-    groups <- unique(gdat$Group)
+    # group -> color map (ensure unique)
+    color_map <- setNames(map$Color, map$Group)
     
     p <- plot_ly()
-    for (g in groups) {
-      sub <- gdat %>% filter(Group == g)
+    
+    for (g in unique(gdat$Group)) {
+      sub <- gdat[gdat$Group == g, , drop = FALSE]
       col <- unname(color_map[g])
       
       hover_txt <- paste0(
@@ -679,7 +796,8 @@ server <- function(input, output, session){
       layout(
         title = list(
           text = paste0("Expression preview for <b>", gene, "</b>"),
-          x = 0
+          x = 0.5,
+          xanchor = "center"
         ),
         xaxis = list(title = ""),
         yaxis = list(
