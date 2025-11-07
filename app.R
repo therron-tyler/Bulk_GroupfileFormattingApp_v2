@@ -89,7 +89,7 @@ ui <- fluidPage(
                    textInput("token_delim", "Delimiter regex", value = "[_\\.-]+"),
                    helpText("For each group below, choose one or more tokens. A sample is assigned to that group if its name contains all selected tokens."),
                    uiOutput("token_group_selectors"),
-                   checkboxInput("token_drop_singletons", "Hide groups with only 1 sample", value = FALSE),
+                   # checkboxInput("token_drop_singletons", "Hide groups with only 1 sample", value = FALSE),
                    actionButton("apply_token", "Apply token grouping")
                  ),
                  
@@ -255,16 +255,40 @@ server <- function(input, output, session){
     tibble(Sample = character(), Group = character(), Color = character())
   )
   
+  # token_choices <- reactive({
+  #   df <- assign_df()
+  #   req(nrow(df) > 0)
+  #   
+  #   del <- input$token_delim %||% "[_\\.-]+"
+  #   
+  #   toks <- str_split(df$Sample, pattern = del)
+  #   vals <- unique(unlist(toks))
+  #   vals <- vals[!is.na(vals) & vals != ""]
+  #   sort(vals)
+  # })
+  
   token_choices <- reactive({
     df <- assign_df()
     req(nrow(df) > 0)
     
     del <- input$token_delim %||% "[_\\.-]+"
     
-    toks <- str_split(df$Sample, pattern = del)
-    vals <- unique(unlist(toks))
-    vals <- vals[!is.na(vals) & vals != ""]
-    sort(vals)
+    toks_list <- str_split(df$Sample, pattern = del)
+    
+    # flatten, clean
+    toks <- unlist(lapply(toks_list, function(v){
+      v[!is.na(v) & v != ""]
+    }))
+    
+    if (!length(toks)) return(character(0))
+    
+    # count occurrences
+    tab <- table(toks)
+    
+    # keep only tokens that appear in >= 2 samples
+    keep <- names(tab)[tab > 1]
+    
+    sort(keep)
   })
   
   # Initialize assign_df when samples change
@@ -394,83 +418,6 @@ server <- function(input, output, session){
   })
   
   # Apply token-based grouping
-  # observeEvent(input$apply_token, {
-  #   df_assign <- assign_df()
-  #   req(nrow(df_assign) > 0)
-  #   
-  #   tt <- tokens_tbl()
-  #   req(nrow(tt) > 0)
-  #   
-  #   dims <- input$token_dims
-  #   if (is.null(dims) || !length(dims)) {
-  #     showModal(modalDialog(
-  #       title = "Choose token positions",
-  #       "Please select at least one token position to define groups.",
-  #       easyClose = TRUE
-  #     ))
-  #     return()
-  #   }
-  #   
-  #   # Build group labels as combinations of selected positions
-  #   grp_labels <- apply(
-  #     tt[, dims, drop = FALSE],
-  #     1,
-  #     function(row) {
-  #       parts <- row[!is.na(row) & row != ""]
-  #       if (!length(parts)) NA_character_ else paste(parts, collapse = "_")
-  #     }
-  #   )
-  #   
-  #   # Drop singleton groups if requested
-  #   if (isTRUE(input$token_drop_singletons)) {
-  #     tab  <- table(grp_labels)
-  #     keep <- names(tab)[tab > 1]
-  #     grp_labels[!(grp_labels %in% keep)] <- NA_character_
-  #   }
-  #   
-  #   df_assign$Group <- grp_labels
-  #   
-  #   uniq <- sort(unique(na.omit(df_assign$Group)))
-  #   if (!length(uniq)) {
-  #     assign_df(df_assign)
-  #     updateSelectInput(session, "bulk_group", choices = character(0))
-  #     return()
-  #   }
-  #   
-  #   # Build consistent color map: one color per group
-  #   cfg <- groups_rv()
-  #   color_map <- setNames(rep(NA_character_, length(uniq)), uniq)
-  #   
-  #   if (nrow(cfg)) {
-  #     overlap <- intersect(uniq, cfg$Group)
-  #     color_map[overlap] <- cfg$Color[match(overlap, cfg$Group)]
-  #   }
-  #   
-  #   missing <- which(!nzchar(color_map) | is.na(color_map))
-  #   if (length(missing)) {
-  #     color_map[missing] <- fallback_palette(length(missing))
-  #   }
-  #   
-  #   df_assign$Color <- ifelse(
-  #     is.na(df_assign$Group),
-  #     NA_character_,
-  #     unname(color_map[df_assign$Group])
-  #   )
-  #   
-  #   # Update global group config + n_groups to match these tokens
-  #   groups_rv(
-  #     tibble(
-  #       Group = uniq,
-  #       Color = unname(color_map[uniq])
-  #     )
-  #   )
-  #   updateNumericInput(session, "n_groups", value = length(uniq))
-  #   
-  #   assign_df(df_assign)
-  #   updateSelectInput(session, "bulk_group", choices = uniq)
-  #   updateTabsetPanel(session, "tabs", selected = "Assignment table")
-  # })
-  
   observeEvent(input$apply_token, {
     df <- assign_df()
     req(nrow(df) > 0)
@@ -523,11 +470,15 @@ server <- function(input, output, session){
     }
     
     # Optionally drop groups with only a single sample
-    if (isTRUE(input$token_drop_singletons)) {
-      tab <- table(assigned_group)
-      keep <- names(tab)[tab > 1]
-      assigned_group[!(assigned_group %in% keep)] <- NA_character_
-    }
+    # if (isTRUE(input$token_drop_singletons)) {
+    #   tab <- table(assigned_group)
+    #   keep <- names(tab)[tab > 1]
+    #   assigned_group[!(assigned_group %in% keep)] <- NA_character_
+    # }
+    
+    tab <- table(assigned_group)
+    keep <- names(tab)[tab > 1]
+    assigned_group[!(assigned_group %in% keep)] <- NA_character_
     
     # Apply to df
     df$Group <- assigned_group
@@ -556,72 +507,33 @@ server <- function(input, output, session){
     df <- assign_df()
     req(nrow(df) > 0)
     
-    grp_names <- groups_rv()$Group
+    # Display-only copy
+    display_df <- df
+    display_df$Group[is.na(display_df$Group) | display_df$Group == ""] <- "Unassigned"
     
-    dt <- datatable(
-      df,
+    datatable(
+      display_df,
       selection = "multiple",
       rownames  = FALSE,
       options   = list(
-        scrollX   = TRUE,
-        pageLength = 200,
-        columnDefs = list(
-          list(
-            targets = 1,
-            render  = DT::JS(sprintf(
-              "function(data,type,row,meta){
-                 var v = data || '';
-                 var opts = %s;
-                 var sel = '';
-                 opts.forEach(function(o){
-                   sel += '<option ' + (o==v?'selected':'') + '>' + o + '</option>';
-                 });
-                 return type === 'display'
-                   ? '<select class=\"dt-group\">' + sel + '</select>'
-                   : data;
-               }",
-              jsonlite::toJSON(grp_names)
-            ))
-          )
-        )
+        scrollX    = TRUE,
+        pageLength = 200
       )
-    )
-    
-    dt %>%
+    ) %>%
       formatStyle(
         "Color",
         target = "cell",
-        backgroundColor = styleEqual(unique(df$Color), unique(df$Color))
+        backgroundColor = styleEqual(
+          unique(df$Color),
+          unique(df$Color)
+        )
+      ) %>%
+      formatStyle(
+        "Group",
+        color = styleEqual("Unassigned", "grey40"),
+        fontStyle = styleEqual("Unassigned", "italic")
       )
   }, server = FALSE)
-  
-  # Bind JS handler once
-  observe({
-    session$sendCustomMessage("bindGroupSelect", list(id = "assign_dt"))
-  })
-  
-  # Per-row dropdown change
-  observeEvent(input$assign_change, {
-    ch <- input$assign_change
-    req(ch$row, ch$value)
-    
-    df <- assign_df()
-    req(ch$row <= nrow(df))
-    
-    df$Group[ch$row] <- ch$value
-    
-    df <- df %>%
-      left_join(groups_rv(), by = "Group") %>%
-      transmute(
-        Sample,
-        Group,
-        Color = ifelse(!is.na(Color.y) & nzchar(Color.y),
-                       Color.y,
-                       Color.x)
-      )
-    
-    assign_df(df)
-  })
   
   # Bulk apply
   observeEvent(input$apply_bulk, {
@@ -840,22 +752,7 @@ server <- function(input, output, session){
   )
 }
 
-# JS handler for the in-table group dropdown
-js <- "
-Shiny.addCustomMessageHandler('bindGroupSelect', function(opts){
-  var id  = opts.id;
-  var tbl = $('#' + id + ' table');
-  tbl.on('change', 'select.dt-group', function(){
-    var rowIdx = $(this).closest('tr').index();
-    var val    = $(this).val();
-    Shiny.setInputValue('assign_change',
-      {row: rowIdx + 1, value: val},
-      {priority: 'event'});
-  });
-});
-"
-
 shinyApp(
-  ui = tagList(ui, tags$script(HTML(js))),
+  ui = ui,
   server = server
 )
