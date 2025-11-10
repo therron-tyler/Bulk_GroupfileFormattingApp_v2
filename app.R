@@ -85,12 +85,22 @@ ui <- fluidPage(
                                "Manual table"       = "manual"),
                    selected = "token"
                  ),
+                 # conditionalPanel(
+                 #   condition = "input.group_mode == 'token'",
+                 #   textInput("token_delim", "Delimiter regex", value = "[_\\.-]+"),
+                 #   helpText("For each group below, choose one or more tokens. A sample is assigned to that group if its name contains all selected tokens."),
+                 #   uiOutput("token_group_selectors"),
+                 #   # checkboxInput("token_drop_singletons", "Hide groups with only 1 sample", value = FALSE),
+                 #   actionButton("apply_token", "Apply token grouping")
+                 # ),
                  conditionalPanel(
                    condition = "input.group_mode == 'token'",
                    textInput("token_delim", "Delimiter regex", value = "[_\\.-]+"),
-                   helpText("For each group below, choose one or more tokens. A sample is assigned to that group if its name contains all selected tokens."),
+                   checkboxInput("token_drop_singletons", "Hide tokens with only 1 sample", value = TRUE),
+                   helpText("For each group, choose one or more tokens. ",
+                            "A sample is assigned to that group if its name contains ANY of those tokens. ",
+                            "If multiple groups match, the top-most group wins."),
                    uiOutput("token_group_selectors"),
-                   # checkboxInput("token_drop_singletons", "Hide groups with only 1 sample", value = FALSE),
                    actionButton("apply_token", "Apply token grouping")
                  ),
                  
@@ -297,6 +307,29 @@ server <- function(input, output, session){
     tibble(Sample = character(), Group = character(), Color = character())
   )
   
+  # token_choices <- reactive({
+  #   df <- assign_df()
+  #   req(nrow(df) > 0)
+  #   
+  #   del <- input$token_delim %||% "[_\\.-]+"
+  #   
+  #   toks_list <- str_split(df$Sample, pattern = del)
+  #   
+  #   # flatten, clean
+  #   toks <- unlist(lapply(toks_list, function(v){
+  #     v[!is.na(v) & v != ""]
+  #   }))
+  #   
+  #   if (!length(toks)) return(character(0))
+  #   
+  #   # count occurrences
+  #   tab <- table(toks)
+  #   
+  #   # keep only tokens that appear in >= 2 samples
+  #   keep <- names(tab)[tab > 1]
+  #   
+  #   sort(keep)
+  # })
   token_choices <- reactive({
     df <- assign_df()
     req(nrow(df) > 0)
@@ -305,18 +338,20 @@ server <- function(input, output, session){
     
     toks_list <- str_split(df$Sample, pattern = del)
     
-    # flatten, clean
-    toks <- unlist(lapply(toks_list, function(v){
-      v[!is.na(v) & v != ""]
+    toks <- unlist(lapply(toks_list, function(v) {
+      v <- v[!is.na(v) & v != ""]
+      v
     }))
     
     if (!length(toks)) return(character(0))
     
-    # count occurrences
     tab <- table(toks)
     
-    # keep only tokens that appear in >= 2 samples
-    keep <- names(tab)[tab > 1]
+    if (isTRUE(input$token_drop_singletons)) {
+      keep <- names(tab)[tab > 1]
+    } else {
+      keep <- names(tab)
+    }
     
     sort(keep)
   })
@@ -448,6 +483,82 @@ server <- function(input, output, session){
   })
   
   # Apply token-based grouping
+  # observeEvent(input$apply_token, {
+  #   df <- assign_df()
+  #   req(nrow(df) > 0)
+  #   
+  #   grps <- groups_rv()
+  #   req(nrow(grps) > 0)
+  #   
+  #   del <- input$token_delim %||% "[_\\.-]+"
+  #   
+  #   # Split each sample into its tokens
+  #   toks_list <- str_split(df$Sample, pattern = del)
+  #   sample_tokens <- lapply(toks_list, function(v){
+  #     unique(v[!is.na(v) & v != ""])
+  #   })
+  #   
+  #   # Collect selected tokens per group (one rule per group)
+  #   grp_tokens <- lapply(seq_len(nrow(grps)), function(i){
+  #     sel <- input[[paste0("grp_tokens_", i)]]
+  #     sel <- sel[!is.na(sel) & sel != ""]
+  #     sel
+  #   })
+  #   names(grp_tokens) <- grps$Group
+  #   
+  #   # If no group has tokens, bail nicely
+  #   if (all(vapply(grp_tokens, length, integer(1)) == 0)) {
+  #     showModal(modalDialog(
+  #       title = "No token rules defined",
+  #       "Please select one or more tokens for at least one group before applying.",
+  #       easyClose = TRUE
+  #     ))
+  #     return()
+  #   }
+  #   
+  #   # Assign each sample to at most one group:
+  #   # a sample is in group G if it contains ALL tokens for G.
+  #   # If multiple groups match, first (top-most) group wins.
+  #   assigned_group <- rep(NA_character_, length(sample_tokens))
+  #   
+  #   for (g in names(grp_tokens)) {
+  #     toks <- grp_tokens[[g]]
+  #     if (!length(toks)) next
+  #     
+  #     hit <- vapply(sample_tokens, function(st){
+  #       all(toks %in% st)
+  #     }, logical(1))
+  #     
+  #     # Only fill unassigned samples
+  #     assignable <- is.na(assigned_group) & hit
+  #     assigned_group[assignable] <- g
+  #   }
+  #   
+  #   tab <- table(assigned_group)
+  #   keep <- names(tab)[tab > 1]
+  #   assigned_group[!(assigned_group %in% keep)] <- NA_character_
+  #   
+  #   # Apply to df
+  #   df$Group <- assigned_group
+  #   
+  #   # Map colors: exactly one color per group from groups_rv
+  #   color_map <- setNames(grps$Color, grps$Group)
+  #   df$Color <- ifelse(
+  #     is.na(df$Group),
+  #     NA_character_,
+  #     unname(color_map[df$Group])
+  #   )
+  #   
+  #   assign_df(df)
+  #   
+  #   # Update bulk group dropdown to only show used groups
+  #   used_groups <- sort(unique(na.omit(df$Group)))
+  #   updateSelectInput(session, "bulk_group", choices = used_groups)
+  #   
+  #   # Jump to table so user can see the effect
+  #   updateTabsetPanel(session, "tabs", selected = "Assignment table")
+  # })
+  
   observeEvent(input$apply_token, {
     df <- assign_df()
     req(nrow(df) > 0)
@@ -457,14 +568,14 @@ server <- function(input, output, session){
     
     del <- input$token_delim %||% "[_\\.-]+"
     
-    # Split each sample into its tokens
+    # Split sample names into tokens once
     toks_list <- str_split(df$Sample, pattern = del)
-    sample_tokens <- lapply(toks_list, function(v){
+    sample_tokens <- lapply(toks_list, function(v) {
       unique(v[!is.na(v) & v != ""])
     })
     
-    # Collect selected tokens per group (one rule per group)
-    grp_tokens <- lapply(seq_len(nrow(grps)), function(i){
+    # Collect selected tokens per group
+    grp_tokens <- lapply(seq_len(nrow(grps)), function(i) {
       sel <- input[[paste0("grp_tokens_", i)]]
       sel <- sel[!is.na(sel) & sel != ""]
       sel
@@ -482,31 +593,26 @@ server <- function(input, output, session){
     }
     
     # Assign each sample to at most one group:
-    # a sample is in group G if it contains ALL tokens for G.
-    # If multiple groups match, first (top-most) group wins.
+    # sample ∈ G if it contains ANY token in grp_tokens[G];
+    # if multiple groups match, first (top-most) group wins.
     assigned_group <- rep(NA_character_, length(sample_tokens))
     
     for (g in names(grp_tokens)) {
       toks <- grp_tokens[[g]]
       if (!length(toks)) next
       
-      hit <- vapply(sample_tokens, function(st){
-        all(toks %in% st)
+      hit <- vapply(sample_tokens, function(st) {
+        any(toks %in% st)
       }, logical(1))
       
-      # Only fill unassigned samples
       assignable <- is.na(assigned_group) & hit
       assigned_group[assignable] <- g
     }
     
-    tab <- table(assigned_group)
-    keep <- names(tab)[tab > 1]
-    assigned_group[!(assigned_group %in% keep)] <- NA_character_
-    
     # Apply to df
     df$Group <- assigned_group
     
-    # Map colors: exactly one color per group from groups_rv
+    # Map colors 1:1 from groups_rv
     color_map <- setNames(grps$Color, grps$Group)
     df$Color <- ifelse(
       is.na(df$Group),
@@ -516,11 +622,9 @@ server <- function(input, output, session){
     
     assign_df(df)
     
-    # Update bulk group dropdown to only show used groups
     used_groups <- sort(unique(na.omit(df$Group)))
     updateSelectInput(session, "bulk_group", choices = used_groups)
     
-    # Jump to table so user can see the effect
     updateTabsetPanel(session, "tabs", selected = "Assignment table")
   })
   
@@ -765,6 +869,33 @@ server <- function(input, output, session){
   
 
   
+  # output$token_group_selectors <- renderUI({
+  #   req(input$group_mode == "token")
+  #   choices <- token_choices()
+  #   req(length(choices) > 0)
+  #   
+  #   grps <- groups_rv()
+  #   req(nrow(grps) > 0)
+  #   
+  #   tagList(
+  #     lapply(seq_len(nrow(grps)), function(i){
+  #       div(
+  #         tags$b(grps$Group[i]),
+  #         selectizeInput(
+  #           inputId = paste0("grp_tokens_", i),
+  #           label   = NULL,
+  #           choices = choices,
+  #           multiple = TRUE,
+  #           options = list(
+  #             plugins = list("remove_button"),
+  #             placeholder = "Select tokens that define this group"
+  #           )
+  #         ),
+  #         tags$hr(style = "margin:4px 0;")
+  #       )
+  #     })
+  #   )
+  # })
   output$token_group_selectors <- renderUI({
     req(input$group_mode == "token")
     choices <- token_choices()
@@ -774,7 +905,7 @@ server <- function(input, output, session){
     req(nrow(grps) > 0)
     
     tagList(
-      lapply(seq_len(nrow(grps)), function(i){
+      lapply(seq_len(nrow(grps)), function(i) {
         div(
           tags$b(grps$Group[i]),
           selectizeInput(
@@ -784,7 +915,7 @@ server <- function(input, output, session){
             multiple = TRUE,
             options = list(
               plugins = list("remove_button"),
-              placeholder = "Select tokens that define this group"
+              placeholder = "Select tokens for this group"
             )
           ),
           tags$hr(style = "margin:4px 0;")
