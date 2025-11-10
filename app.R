@@ -112,19 +112,12 @@ ui <- fluidPage(
                                    ),
                                    DTOutput("assign_dt")
                           ),
-                          # tabPanel("Visualization preview",
-                          #          br(),
-                          #          helpText("Quick QC: boxplots of top expressed genes using your current group assignments and colors."),
-                          #          uiOutput("viz_gene_ui"),
-                          #          plotlyOutput("viz_plot", height = "420px")
-                          # )
                           tabPanel("Visualization preview",
                                    br(),
                                    helpText("Quick QC: boxplots using your current group assignments and colors."),
                                    uiOutput("viz_gene_ui"),
                                    div(
-                                     style = "width:500px; margin:0 auto;",
-                                     plotlyOutput("viz_plot", height = "500px")
+                                     plotlyOutput("viz_plot", height = "900px", width = "85%")
                                    )
                           )
               )
@@ -625,32 +618,33 @@ server <- function(input, output, session){
     df_long
   })
   
-  # high_expr_data <- reactive({
-  #   expr <- expr_long()
-  #   map  <- final_group_df()
-  #   
-  #   df <- expr %>%
-  #     inner_join(map, by = "Sample") %>%
-  #     filter(!is.na(Group), !is.na(Color))
-  #   
-  #   req(nrow(df) > 0)
-  #   
-  #   df$Count <- suppressWarnings(as.numeric(df$Count))
-  #   
-  #   top_genes <- df %>%
-  #     group_by(Gene) %>%
-  #     summarize(mean_expr = mean(Count, na.rm = TRUE), .groups = "drop") %>%
-  #     arrange(desc(mean_expr)) %>%
-  #     slice_head(n = 12) %>%
-  #     pull(Gene)
-  #   
-  #   list(df = df, top_genes = top_genes)
-  # })
-  
   viz_gene_choices <- reactive({
     df_long <- expr_long()
-    genes <- sort(unique(df_long$Gene))
-    genes[!is.na(genes) & genes != ""]
+    
+    # Make sure Count is numeric
+    df_long$Count <- suppressWarnings(as.numeric(df_long$Count))
+    
+    # Average expression per gene across all selected samples
+    gene_stats <- df_long %>%
+      dplyr::group_by(Gene) %>%
+      dplyr::summarize(
+        mean_expr = mean(Count, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    # Keep genes with mean expression >= 2
+    keep <- gene_stats %>%
+      dplyr::filter(!is.na(Gene), Gene != "", mean_expr >= 2) %>%
+      dplyr::arrange(Gene) %>%
+      dplyr::pull(Gene)
+    
+    # Fallback: if filtering nukes everything (weird file), return all valid genes
+    if (!length(keep)) {
+      keep <- df_long$Gene[!is.na(df_long$Gene) & df_long$Gene != ""]
+      keep <- sort(unique(keep))
+    }
+    
+    keep
   })
   
   output$viz_gene_ui <- renderUI({
@@ -665,149 +659,111 @@ server <- function(input, output, session){
     )
   })
   
-  # output$viz_gene_ui <- renderUI({
-  #   he <- high_expr_data()
-  #   choices <- he$top_genes
-  #   req(length(choices) > 0)
-  #   
-  #   selectInput(
-  #     "viz_gene",
-  #     "Choose gene to preview (top expressed):",
-  #     choices = choices,
-  #     selected = choices[1]
-  #   )
-  # })
-  
-  # output$viz_plot <- renderPlotly({
-  #   he <- high_expr_data()
-  #   df <- he$df
-  #   req(nrow(df) > 0)
-  #   
-  #   gene <- input$viz_gene %||% he$top_genes[1]
-  #   req(gene)
-  #   
-  #   map <- final_group_df()
-  #   color_map <- setNames(map$Color, map$Group)
-  #   
-  #   gdat <- df %>% filter(Gene == gene)
-  #   req(nrow(gdat) > 0)
-  #   
-  #   groups <- unique(gdat$Group)
-  #   
-  #   p <- plot_ly()
-  #   for (g in groups) {
-  #     sub <- gdat %>% filter(Group == g)
-  #     col <- unname(color_map[g])
-  #     
-  #     hover_txt <- paste0(
-  #       "<b>Sample</b>: ", sub$Sample,
-  #       "<br><b>Group</b>: ", sub$Group,
-  #       "<br><b>Expr</b>: ", signif(sub$Count, 4)
-  #     )
-  #     
-  #     p <- p %>%
-  #       add_trace(
-  #         data = sub,
-  #         x = ~Group,
-  #         y = ~Count,
-  #         type = "box",
-  #         name = g,
-  #         marker = list(color = col),
-  #         line   = list(color = col),
-  #         boxpoints = "all",
-  #         jitter    = 0.3,
-  #         pointpos  = 0,
-  #         text      = hover_txt,
-  #         hoverinfo = "text",
-  #         showlegend = FALSE
-  #       )
-  #   }
-  #   
-  #   p %>%
-  #     layout(
-  #       title = list(
-  #         text = paste0("Expression preview for <b>", gene, "</b>"),
-  #         x = 0
-  #       ),
-  #       xaxis = list(title = ""),
-  #       yaxis = list(
-  #         title = "Expression (units from uploaded file)",
-  #         zeroline = TRUE
-  #       ),
-  #       boxmode = "group",
-  #       margin = list(t = 60, b = 40, l = 60, r = 20)
-  #     )
-  # })
   output$viz_plot <- renderPlotly({
     # Long expression data
     expr <- expr_long()
-    
+
     # Current mapping (Sample, Group, Color)
     map <- final_group_df()
     req(nrow(map) > 0)
-    
+
     # Join to bring in Group/Color only for assigned samples
     df <- expr %>%
       inner_join(map, by = "Sample") %>%
       filter(!is.na(Group), !is.na(Color))
     req(nrow(df) > 0)
-    
+
+    # Ensure numeric
+    df$Count <- suppressWarnings(as.numeric(df$Count))
+
     # Gene to show
     gene <- input$viz_gene %||% viz_gene_choices()[1]
     req(gene)
-    
+
     gdat <- df %>% filter(Gene == gene)
     req(nrow(gdat) > 0)
-    
-    # group -> color map (ensure unique)
-    color_map <- setNames(map$Color, map$Group)
-    
+
+    # Ordered groups in the order they appear
+    ordered_groups <- unique(gdat$Group)
+    gdat$Group <- factor(gdat$Group, levels = ordered_groups)
+
+    # group -> color map (respect map)
+    color_map <- setNames(
+      map$Color[match(ordered_groups, map$Group)],
+      ordered_groups
+    )
+
     p <- plot_ly()
-    
-    for (g in unique(gdat$Group)) {
-      sub <- gdat[gdat$Group == g, , drop = FALSE]
-      col <- unname(color_map[g])
-      
+
+    for (grp in ordered_groups) {
+      sub <- gdat[gdat$Group == grp, , drop = FALSE]
+      col <- unname(color_map[[grp]])
+
       hover_txt <- paste0(
         "<b>Sample</b>: ", sub$Sample,
         "<br><b>Group</b>: ", sub$Group,
         "<br><b>Expr</b>: ", signif(sub$Count, 4)
       )
-      
+
+      # Box trace
       p <- p %>%
         add_trace(
           data = sub,
           x = ~Group,
           y = ~Count,
           type = "box",
-          name = g,
-          marker = list(color = col),
-          line   = list(color = col),
-          boxpoints = "all",
-          jitter    = 0.3,
-          pointpos  = 0,
-          text      = hover_txt,
+          name = grp,
+          # marker = list(color = I(col)),
+          # line   = list(color = col),
+          color = I(col),
+          boxpoints = "outliers",
+          hoverinfo = "y+name",
+          showlegend = FALSE
+        )
+
+      # Overlay points (like bulk app)
+      p <- p %>%
+        add_trace(
+          data = sub,
+          x = ~Group,
+          y = ~Count,
+          type = "scatter",
+          mode = "markers",
+          marker = list(color = col, size = 8, opacity = 0.7),
+          text = hover_txt,
           hoverinfo = "text",
           showlegend = FALSE
         )
     }
-    
+
+    upper_lim <- suppressWarnings(max(gdat$Count, na.rm = TRUE))
+    if (!is.finite(upper_lim)) upper_lim <- NULL
+
     p %>%
       layout(
         title = list(
-          text = paste0("Expression preview for <b>", gene, "</b>"),
+          text = paste0("<span style='color:blue;'>", gene, "</span>"),
           x = 0.5,
-          xanchor = "center"
+          xanchor = "center",
+          font = list(size = 20)
         ),
-        xaxis = list(title = ""),
+        xaxis = list(
+          title = "",
+          categoryorder = "array",
+          categoryarray = ordered_groups
+        ),
         yaxis = list(
           title = "Expression (units from uploaded file)",
-          zeroline = TRUE
+          zeroline = TRUE,
+          zerolinewidth = 2,
+          zerolinecolor = "#000000",
+          range = if (!is.null(upper_lim)) c(0, upper_lim * 1.05) else NULL
         ),
-        boxmode = "group",
-        margin = list(t = 60, b = 40, l = 60, r = 20)
+        margin = list(t = 80, b = 80, l = 80, r = 40)
       )
   })
+  
+
   
   output$token_group_selectors <- renderUI({
     req(input$group_mode == "token")
