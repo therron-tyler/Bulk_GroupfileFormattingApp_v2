@@ -794,36 +794,72 @@ server <- function(input, output, session){
   })
   
   # ---- Download groupfile ----
+  ordered_groups_current <- function(map_df) {
+    grp_def <- groups_rv()
+    lev <- grp_def$Group[grp_def$Group %in% unique(map_df$Group)]
+    lev[!is.na(lev) & nzchar(lev)]
+  }
   
   output$download_groupfile <- downloadHandler(
     filename = function() {
       paste0("groupfile_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".csv")
     },
     content = function(file) {
-      df <- final_group_df()
-      req(nrow(df) > 0)
+      df <- assign_df(); req(nrow(df) > 0)
       
-      if (any(is.na(df$Group) | df$Group == "")) {
-        showModal(modalDialog(
-          title = "Unassigned samples",
-          "Some samples do not have a Group yet. Please assign all samples before downloading.",
-          easyClose = TRUE
-        ))
-        return()
+      # ensure required columns exist
+      out <- df %>% dplyr::transmute(Sample, Group, Color)
+      
+      # validations
+      if (any(!nzchar(out$Sample))) stop("Empty sample names present.")
+      if (any(!nzchar(out$Group)))  stop("Some samples are unassigned to any group.")
+      if (any(!nzchar(out$Color)))  stop("Some samples are missing colors.")
+      
+      # --- enforce the same order as preview / boxplot ---
+      lev <- ordered_groups_current(out)        # UI group order
+      if (length(lev)) {
+        sample_order <- assign_df()$Sample      # on-screen sample order
+        out$Group  <- factor(out$Group,  levels = lev)
+        out$Sample <- factor(out$Sample, levels = sample_order)
+        out <- out %>% dplyr::arrange(Group, Sample)
+        # drop factor types for clean CSV
+        out$Group  <- as.character(out$Group)
+        out$Sample <- as.character(out$Sample)
       }
       
-      if (any(is.na(df$Color) | df$Color == "")) {
-        showModal(modalDialog(
-          title = "Missing colors",
-          "Some groups do not have a Color defined. Please set colors for all groups before downloading.",
-          easyClose = TRUE
-        ))
-        return()
-      }
-      
-      readr::write_csv(df, file)
+      readr::write_csv(out, file)
     }
   )
+  
+  # output$download_groupfile <- downloadHandler(
+  #   filename = function() {
+  #     paste0("groupfile_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".csv")
+  #   },
+  #   content = function(file) {
+  #     df <- final_group_df()
+  #     req(nrow(df) > 0)
+  #     
+  #     if (any(is.na(df$Group) | df$Group == "")) {
+  #       showModal(modalDialog(
+  #         title = "Unassigned samples",
+  #         "Some samples do not have a Group yet. Please assign all samples before downloading.",
+  #         easyClose = TRUE
+  #       ))
+  #       return()
+  #     }
+  #     
+  #     if (any(is.na(df$Color) | df$Color == "")) {
+  #       showModal(modalDialog(
+  #         title = "Missing colors",
+  #         "Some groups do not have a Color defined. Please set colors for all groups before downloading.",
+  #         easyClose = TRUE
+  #       ))
+  #       return()
+  #     }
+  #     
+  #     readr::write_csv(df, file)
+  #   }
+  # )
 }
 
 shinyApp(
