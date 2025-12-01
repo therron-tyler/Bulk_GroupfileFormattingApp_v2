@@ -28,26 +28,47 @@ fallback_palette <- function(n){
   grDevices::hcl(h = hues, l = 65, c = 100)[1:n]
 }
 
-infer_id_cols <- function(df){
-  cand <- names(df)
-  patt <- c(
-    "^symbol$", "^gene_?symbol$", "^genesymbol$",
-    "^ensembl(_?gene)?(_?id)?$", "^ensembl(\\.id)?$"
-  )
-  cand[sapply(cand, function(nm){
-    any(grepl(paste(patt, collapse = "|"), nm, ignore.case = TRUE))
-  })]
-}
-
-numeric_sample_cols <- function(df, id_cols){
-  nums <- names(df)[vapply(df, is.numeric, logical(1))]
-  setdiff(nums, id_cols)
-}
+# infer_id_cols <- function(df){
+#   cand <- names(df)
+#   patt <- c(
+#     "^symbol$", "^gene_?symbol$", "^genesymbol$",
+#     "^ensembl(_?gene)?(_?id)?$", "^ensembl(\\.id)?$"
+#   )
+#   cand[sapply(cand, function(nm){
+#     any(grepl(paste(patt, collapse = "|"), nm, ignore.case = TRUE))
+#   })]
+# }
+# 
+# numeric_sample_cols <- function(df, id_cols){
+#   nums <- names(df)[vapply(df, is.numeric, logical(1))]
+#   setdiff(nums, id_cols)
+# }
 
 # ----------------------- UI ----------------------- #
 
 ui <- fluidPage(
   titlePanel("Winter Lab Bulk RNA-seq: Groupfile Builder (v2)"),
+  tags$head(
+    tags$meta(name = "viewport", content = "width=device-width, initial-scale=1")
+  ),
+  tags$head(
+    tags$style(HTML("
+    /* Make plotly + DT behave nicely on small screens */
+    .plot-container, .js-plotly-plot, .plotly, .datatables { width: 100% !important; }
+
+    /* Responsive: stack sidebar above main on small screens */
+    @media (max-width: 768px) {
+      .container-fluid { padding-left: 10px; padding-right: 10px; }
+      .col-sm-4, .col-sm-8 { width: 100% !important; float: none !important; }
+      .sidebar { margin-bottom: 12px; }
+      .form-control, .selectize-control { font-size: 16px; } /* prevents iOS zoom-on-focus */
+    }
+
+    /* Make DT wrapper horizontally scroll if needed */
+    div.dataTables_wrapper { width: 100%; overflow-x: auto; }
+  "))
+  ),
+  
   tags$hr(),
   
   sidebarLayout(
@@ -57,28 +78,44 @@ ui <- fluidPage(
                    "expression_dataframe", "Choose CSV file",
                    accept = c(".csv","text/csv","text/plain")
                  ),
-                 helpText("Any of these header styles are fine:",
-                          tags$ul(
-                            tags$li("Both: 'EnsemblID' + 'Gene_Symbol' (or 'Symbol', 'GeneSymbol')"),
-                            tags$li("Only 'EnsemblID'"),
-                            tags$li("Only 'Gene_Symbol' / 'GeneSymbol' / 'Symbol'"),
-                            tags$li("Neither (we'll still detect numeric sample columns)")
-                          )
+                 # helpText("Any of these header styles are fine:",
+                 #          tags$ul(
+                 #            tags$li("Both: 'EnsemblID' + 'Gene_Symbol' (or 'Symbol', 'GeneSymbol')"),
+                 #            tags$li("Only 'EnsemblID'"),
+                 #            tags$li("Only 'Gene_Symbol' / 'GeneSymbol' / 'Symbol'"),
+                 #            tags$li("Neither (we'll still detect numeric sample columns)")
+                 #          )
+                 # ),
+                 # uiOutput("id_col_detect"),
+                 # tags$hr(),
+                 
+                 # h4("2) Choose sample columns"),
+                 # uiOutput("sample_picker"),
+                 # uiOutput("unassigned_cols"),
+                 # tags$hr(),
+                 helpText("Input where the sample column(s) begin: "),
+                 
+                 numericInput(
+                   "data_start_col",
+                   "Sample data starts at column #",
+                   value = 3,
+                   min = 1,
+                   step = 1
                  ),
-                 uiOutput("id_col_detect"),
+                 
+                 uiOutput("data_start_preview"),
+                 
                  tags$hr(),
                  
-                 h4("2) Choose sample columns"),
-                 uiOutput("sample_picker"),
-                 uiOutput("unassigned_cols"),
+                 uiOutput("gene_label_ui"),
                  tags$hr(),
                  
-                 h4("3) Define groups & colors"),
+                 h4("2) Define groups & colors"),
                  numericInput("n_groups", "Number of groups", value = 2, min = 1, step = 1),
                  uiOutput("group_name_color_ui"),
                  tags$hr(),
                  
-                 h4("4) Grouping method"),
+                 h4("3) Grouping method"),
                  radioButtons(
                    "group_mode", NULL,
                    choices = c("Token-based (auto)" = "token",
@@ -117,7 +154,15 @@ ui <- fluidPage(
                                      style = "font-size:16px; color:#000000; font-weight:600; margin-bottom:8px;"
                                    ),
                                    fluidRow(
-                                     column(6, selectInput("bulk_group", "Set selected rows to group", choices = NULL)),
+                                     # column(6, selectInput("bulk_group", "Set selected rows to group", choices = NULL)),
+                                     column(
+                                       6,
+                                       selectInput(
+                                         "bulk_group",
+                                         "Set selected rows to group (or Unassign)",
+                                         choices = NULL
+                                       )
+                                     ),
                                      column(6, actionButton("apply_bulk", "Apply to selected"))
                                    ),
                                    DTOutput("assign_dt")
@@ -139,80 +184,129 @@ ui <- fluidPage(
 
 server <- function(input, output, session){
   
+  UNASSIGNED_SENTINEL <- "<UNASSIGNED>"
+  
   # ---- Data load ----
   raw_df <- reactive({
     req(input$expression_dataframe)
     readr::read_csv(input$expression_dataframe$datapath, show_col_types = FALSE)
   })
   
+  # sample_choices <- reactive({
+  #   req(raw_df())
+  #   df <- raw_df()
+  #   id_cols  <- input$id_cols %||% infer_id_cols(df)
+  #   num_cols <- numeric_sample_cols(df, id_cols)
+  #   
+  #   # If we have numeric non-ID columns, use those;
+  #   # otherwise, fall back to all non-ID columns.
+  #   if (length(num_cols)) {
+  #     num_cols
+  #   } else {
+  #     setdiff(names(df), id_cols)
+  #   }
+  # })
+  
   sample_choices <- reactive({
     req(raw_df())
     df <- raw_df()
-    id_cols  <- input$id_cols %||% infer_id_cols(df)
-    num_cols <- numeric_sample_cols(df, id_cols)
     
-    # If we have numeric non-ID columns, use those;
-    # otherwise, fall back to all non-ID columns.
-    if (length(num_cols)) {
-      num_cols
-    } else {
-      setdiff(names(df), id_cols)
+    start <- input$data_start_col %||% 1
+    start <- max(1, min(start, ncol(df)))  # clamp
+    
+    names(df)[start:ncol(df)]
+  })
+  
+  output$data_start_preview <- renderUI({
+    req(raw_df())
+    df <- raw_df()
+    start <- input$data_start_col %||% 1
+    start <- max(1, min(start, ncol(df)))
+    
+    nm <- names(df)
+    preview <- paste0(
+      paste(sprintf("%d:%s", seq_along(nm), nm), collapse = "  |  "),
+      "\n\nSample columns will be: ", start, " .. ", ncol(df)
+    )
+    
+    tags$pre(style="white-space: pre-wrap; font-size: 11px; color:#444; max-height:140px; overflow:auto;",
+             preview)
+  })
+  
+  output$gene_label_ui <- renderUI({
+    req(raw_df())
+    df <- raw_df()
+    
+    start <- input$data_start_col %||% 1
+    start <- max(1, min(start, ncol(df)))
+    
+    ann_cols <- if (start > 1) names(df)[1:(start - 1)] else character(0)
+    
+    if (!length(ann_cols)) {
+      return(helpText("No annotation columns detected (data starts at column 1), so gene labels will use row number."))
     }
+    
+    selectInput(
+      "gene_label_col",
+      "Gene label column (for preview plots)",
+      choices  = ann_cols,
+      selected = ann_cols[1]
+    )
   })
   
   # ---- ID columns ----
-  output$id_col_detect <- renderUI({
-    req(raw_df())
-    df  <- raw_df()
-    ids <- infer_id_cols(df)
-    if (!length(ids)) {
-      div(style = "margin-top:-10px;",
-          helpText("No explicit gene ID columns detected. That's ok."))
-    } else {
-      checkboxGroupInput(
-        "id_cols",
-        "Detected gene ID columns (optional):",
-        choices = ids,
-        selected = ids
-      )
-    }
-  })
+  # output$id_col_detect <- renderUI({
+  #   req(raw_df())
+  #   df  <- raw_df()
+  #   ids <- infer_id_cols(df)
+  #   if (!length(ids)) {
+  #     div(style = "margin-top:-10px;",
+  #         helpText("No explicit gene ID columns detected. That's ok."))
+  #   } else {
+  #     checkboxGroupInput(
+  #       "id_cols",
+  #       "Detected gene ID columns (optional):",
+  #       choices = ids,
+  #       selected = ids
+  #     )
+  #   }
+  # })
   
   # ---- Sample columns ----
-  output$sample_picker <- renderUI({
-    choices <- sample_choices()
-    selectizeInput(
-      "sample_cols", "Sample columns",
-      choices = choices,
-      selected = choices,
-      multiple = TRUE,
-      options = list(plugins = list("remove_button"))
-    )
-  })
+  # output$sample_picker <- renderUI({
+  #   choices <- sample_choices()
+  #   selectizeInput(
+  #     "sample_cols", "Sample columns",
+  #     choices = choices,
+  #     selected = choices,
+  #     multiple = TRUE,
+  #     options = list(plugins = list("remove_button"))
+  #   )
+  # })
   
-  output$unassigned_cols <- renderUI({
-    all_choices <- sample_choices()
-    
-    # What is currently selected in the widget?
-    selected <- input$sample_cols
-    if (is.null(selected)) {
-      # Before the user touches anything, everything is "assigned"
-      selected <- all_choices
-    }
-    
-    unused <- setdiff(all_choices, selected)
-    
-    if (!length(unused)) {
-      return(NULL)  # don't show the box if nothing is unassigned
-    }
-    
-    tagList(
-      tags$b("Unassigned columns"),
-      tags$ul(
-        lapply(unused, function(x) tags$li(x))
-      )
-    )
-  })
+  # output$unassigned_cols <- renderUI({
+  #   all_choices <- sample_choices()
+  #   
+  #   # What is currently selected in the widget?
+  #   selected <- input$sample_cols
+  #   if (is.null(selected)) {
+  #     # Before the user touches anything, everything is "assigned"
+  #     selected <- all_choices
+  #   }
+  #   
+  #   unused <- setdiff(all_choices, selected)
+  #   
+  #   if (!length(unused)) {
+  #     return(NULL)  # don't show the box if nothing is unassigned
+  #   }
+  #   
+  #   tagList(
+  #     tags$b("Unassigned columns"),
+  #     tags$ul(
+  #       lapply(unused, function(x) tags$li(x))
+  #     )
+  #   )
+  # })
   
   # ---- Groups: names & colors ----
   
@@ -330,17 +424,40 @@ server <- function(input, output, session){
   })
   
   # Initialize assign_df when samples change
+  # observe({
+  #   req(raw_df())
+  #   samples <- input$sample_cols
+  #   req(length(samples) > 0)
+  #   df <- tibble(
+  #     Sample = samples,
+  #     Group  = NA_character_,
+  #     Color  = NA_character_
+  #   )
+  #   assign_df(df)
+  #   updateSelectInput(session, "bulk_group", choices = groups_rv()$Group)
+  # })
+  
+  # observe({
+  #   req(raw_df())
+  #   samples <- sample_choices()               # <- auto-detected numeric sample columns
+  #   req(length(samples) > 0)
+  #   df <- tibble(
+  #     Sample = samples,
+  #     Group  = NA_character_,
+  #     Color  = NA_character_
+  #   )
+  #   assign_df(df)
+  #   updateSelectInput(session, "bulk_group", choices = groups_rv()$Group)
+  # })
   observe({
     req(raw_df())
-    samples <- input$sample_cols
-    req(length(samples) > 0)
-    df <- tibble(
-      Sample = samples,
-      Group  = NA_character_,
-      Color  = NA_character_
-    )
+    samples <- sample_choices(); req(length(samples) > 0)
+    df <- tibble(Sample = samples, Group = NA_character_, Color = NA_character_)
     assign_df(df)
-    updateSelectInput(session, "bulk_group", choices = groups_rv()$Group)
+    updateSelectInput(
+      session, "bulk_group",
+      choices = c("(Unassigned)" = UNASSIGNED_SENTINEL, groups_rv()$Group)
+    )
   })
   
   # Final mapping used for viz/download
@@ -519,7 +636,11 @@ server <- function(input, output, session){
     assign_df(df)
     
     used_groups <- sort(unique(na.omit(df$Group)))
-    updateSelectInput(session, "bulk_group", choices = used_groups)
+    # updateSelectInput(session, "bulk_group", choices = used_groups)
+    updateSelectInput(
+      session, "bulk_group",
+      choices = c("(Unassigned)" = UNASSIGNED_SENTINEL, used_groups)
+    )
     
     updateTabsetPanel(session, "tabs", selected = "Assignment table")
   })
@@ -559,64 +680,153 @@ server <- function(input, output, session){
   }, server = FALSE)
   
   # Bulk apply
+  # observeEvent(input$apply_bulk, {
+  #   rows <- input$assign_dt_rows_selected
+  #   grp  <- input$bulk_group
+  #   req(length(rows) >= 1, !is.null(grp), nzchar(grp))
+  #   
+  #   df <- assign_df()
+  #   req(nrow(df) > 0)
+  #   
+  #   df$Group[rows] <- grp
+  #   
+  #   df <- df %>%
+  #     left_join(groups_rv(), by = "Group") %>%
+  #     transmute(
+  #       Sample,
+  #       Group,
+  #       Color = ifelse(!is.na(Color.y) & nzchar(Color.y),
+  #                      Color.y,
+  #                      Color.x)
+  #     )
+  #   
+  #   assign_df(df)
+  # })
   observeEvent(input$apply_bulk, {
     rows <- input$assign_dt_rows_selected
     grp  <- input$bulk_group
     req(length(rows) >= 1, !is.null(grp), nzchar(grp))
     
-    df <- assign_df()
-    req(nrow(df) > 0)
+    df <- assign_df(); req(nrow(df) > 0)
     
-    df$Group[rows] <- grp
-    
-    df <- df %>%
-      left_join(groups_rv(), by = "Group") %>%
-      transmute(
-        Sample,
-        Group,
-        Color = ifelse(!is.na(Color.y) & nzchar(Color.y),
-                       Color.y,
-                       Color.x)
-      )
+    if (identical(grp, UNASSIGNED_SENTINEL)) {
+      # Unassign: clear Group and Color
+      df$Group[rows] <- NA_character_
+      df$Color[rows] <- NA_character_
+    } else {
+      # Assign to a named group and set color from groups_rv
+      df$Group[rows] <- grp
+      df <- df %>%
+        dplyr::left_join(groups_rv(), by = "Group") %>%
+        dplyr::transmute(
+          Sample,
+          Group,
+          Color = dplyr::if_else(
+            !is.na(Color.y) & nzchar(Color.y),
+            Color.y,
+            Color.x
+          )
+        )
+    }
     
     assign_df(df)
   })
   
   # ---- Visualization preview ----
   
+  # expr_long <- reactive({
+  #   df <- raw_df()
+  #   req(df)
+  #   
+  #   id_cols  <- input$id_cols %||% infer_id_cols(df)
+  #   samples  <- input$sample_cols
+  #   req(length(samples) > 0)
+  #   
+  #   keep_cols <- unique(c(id_cols, samples))
+  #   df <- df[, keep_cols, drop = FALSE]
+  #   
+  #   gene_col <- intersect(
+  #     c("Gene_Symbol", "GeneSymbol", "Symbol", "gene", "Gene"),
+  #     names(df)
+  #   )[1]
+  #   if (is.na(gene_col)) {
+  #     gene_col <- intersect(
+  #       c("EnsemblID", "ensembl_gene_id", "ensembl_id"),
+  #       names(df)
+  #     )[1]
+  #   }
+  #   
+  #   df_long <- df %>%
+  #     pivot_longer(
+  #       cols = all_of(samples),
+  #       names_to  = "Sample",
+  #       values_to = "Count"
+  #     )
+  #   
+  #   df_long$Gene <- if (!is.na(gene_col)) df_long[[gene_col]] else seq_len(nrow(df_long))
+  #   
+  #   df_long
+  # })
+  
+  # expr_long <- reactive({
+  #   df <- raw_df(); req(df)
+  #   
+  #   id_cols  <- input$id_cols %||% infer_id_cols(df)
+  #   samples  <- sample_choices()               # <- use auto columns
+  #   req(length(samples) > 0)
+  #   
+  #   keep_cols <- unique(c(id_cols, samples))
+  #   df <- df[, keep_cols, drop = FALSE]
+  #   
+  #   gene_col <- intersect(
+  #     c("Gene_Symbol", "GeneSymbol", "Symbol", "gene", "Gene"),
+  #     names(df)
+  #   )[1]
+  #   if (is.na(gene_col)) {
+  #     gene_col <- intersect(
+  #       c("EnsemblID", "ensembl_gene_id", "ensembl_id"),
+  #       names(df)
+  #     )[1]
+  #   }
+  #   
+  #   df_long <- df %>%
+  #     tidyr::pivot_longer(
+  #       cols = dplyr::all_of(samples),
+  #       names_to  = "Sample",
+  #       values_to = "Count"
+  #     )
+  #   
+  #   df_long$Gene <- if (!is.na(gene_col)) df_long[[gene_col]] else seq_len(nrow(df_long))
+  #   df_long
+  # })
+  
   expr_long <- reactive({
-    df <- raw_df()
-    req(df)
+    df <- raw_df(); req(df)
     
-    id_cols  <- input$id_cols %||% infer_id_cols(df)
-    samples  <- input$sample_cols
+    samples <- sample_choices()
     req(length(samples) > 0)
     
-    keep_cols <- unique(c(id_cols, samples))
-    df <- df[, keep_cols, drop = FALSE]
-    
-    gene_col <- intersect(
-      c("Gene_Symbol", "GeneSymbol", "Symbol", "gene", "Gene"),
-      names(df)
-    )[1]
-    if (is.na(gene_col)) {
-      gene_col <- intersect(
-        c("EnsemblID", "ensembl_gene_id", "ensembl_id"),
-        names(df)
-      )[1]
-    }
-    
+    # pivot sample columns long
     df_long <- df %>%
-      pivot_longer(
-        cols = all_of(samples),
+      tidyr::pivot_longer(
+        cols = dplyr::all_of(samples),
         names_to  = "Sample",
         values_to = "Count"
       )
     
-    df_long$Gene <- if (!is.na(gene_col)) df_long[[gene_col]] else seq_len(nrow(df_long))
+    # gene label for plotting
+    gl <- input$gene_label_col %||% "__ROW__"
+    if (identical(gl, "__ROW__") || is.null(gl) || !gl %in% names(df)) {
+      # row number (recycled across pivot rows)
+      df_long$Gene <- rep(seq_len(nrow(df)), each = length(samples))
+    } else {
+      # chosen annotation column
+      df_long$Gene <- rep(df[[gl]], each = length(samples))
+    }
     
     df_long
   })
+  
   
   viz_gene_choices <- reactive({
     df_long <- expr_long()
