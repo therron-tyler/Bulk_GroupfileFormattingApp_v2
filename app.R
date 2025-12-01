@@ -333,11 +333,51 @@ server <- function(input, output, session){
   }, ignoreInit = TRUE)
   
   # UI for group names/colors
+  # output$group_name_color_ui <- renderUI({
+  #   df <- groups_rv()
+  #   req(nrow(df) > 0)
+  #   tagList(
+  #     lapply(seq_len(nrow(df)), function(i){
+  #       fluidRow(
+  #         column(
+  #           8,
+  #           textInput(
+  #             paste0("grp_name_", i),
+  #             label = paste("Group", i, "name"),
+  #             value = df$Group[i]
+  #           )
+  #         ),
+  #         column(
+  #           4,
+  #           colourInput(
+  #             paste0("grp_col_", i),
+  #             label = "Color",
+  #             value = df$Color[i],
+  #             showColour = "both"
+  #           )
+  #         )
+  #       )
+  #     })
+  #   )
+  # })
   output$group_name_color_ui <- renderUI({
-    df <- groups_rv()
-    req(nrow(df) > 0)
+    ng <- input$n_groups %||% 1
+    req(ng >= 1)
+    
+    df <- isolate(groups_rv())  # <- key change (no reactive dependency)
+    
+    # make sure df has ng rows (safety)
+    if (nrow(df) < ng) {
+      df <- bind_rows(df, tibble(
+        Group = paste0("Group ", (nrow(df) + 1):ng),
+        Color = fallback_palette(ng - nrow(df))
+      ))
+    } else if (nrow(df) > ng) {
+      df <- df[seq_len(ng), ]
+    }
+    
     tagList(
-      lapply(seq_len(nrow(df)), function(i){
+      lapply(seq_len(ng), function(i){
         fluidRow(
           column(
             8,
