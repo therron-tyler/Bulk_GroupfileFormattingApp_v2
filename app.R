@@ -78,21 +78,7 @@ ui <- fluidPage(
                    "expression_dataframe", "Choose CSV file",
                    accept = c(".csv","text/csv","text/plain")
                  ),
-                 # helpText("Any of these header styles are fine:",
-                 #          tags$ul(
-                 #            tags$li("Both: 'EnsemblID' + 'Gene_Symbol' (or 'Symbol', 'GeneSymbol')"),
-                 #            tags$li("Only 'EnsemblID'"),
-                 #            tags$li("Only 'Gene_Symbol' / 'GeneSymbol' / 'Symbol'"),
-                 #            tags$li("Neither (we'll still detect numeric sample columns)")
-                 #          )
-                 # ),
-                 # uiOutput("id_col_detect"),
-                 # tags$hr(),
                  
-                 # h4("2) Choose sample columns"),
-                 # uiOutput("sample_picker"),
-                 # uiOutput("unassigned_cols"),
-                 # tags$hr(),
                  helpText("Input where the sample column(s) begin: "),
                  
                  numericInput(
@@ -122,18 +108,19 @@ ui <- fluidPage(
                                "Manual table"       = "manual"),
                    selected = "token"
                  ),
-                 # conditionalPanel(
-                 #   condition = "input.group_mode == 'token'",
-                 #   textInput("token_delim", "Delimiter regex", value = "[_\\.-]+"),
-                 #   helpText("For each group below, choose one or more tokens. A sample is assigned to that group if its name contains all selected tokens."),
-                 #   uiOutput("token_group_selectors"),
-                 #   # checkboxInput("token_drop_singletons", "Hide groups with only 1 sample", value = FALSE),
-                 #   actionButton("apply_token", "Apply token grouping")
-                 # ),
                  conditionalPanel(
                    condition = "input.group_mode == 'token'",
-                   textInput("token_delim", "Delimiter regex", value = "[_\\.-]+"),
-                   checkboxInput("token_drop_singletons", "Hide tokens with only 1 sample", value = TRUE),
+                   # textInput("token_delim", "Delimiter regex", value = "[_\\.-]+"),
+                   checkboxGroupInput(
+                     "token_delims",
+                     "Split sample names on:",
+                     choices  = c("underscore (_)" = "_",
+                                  "dash (-)"      = "-",
+                                  "dot (.)"       = ".",
+                                  "space"         = " "),
+                     selected = c("_", "-")   # sensible default
+                   ),
+                   # checkboxInput("token_drop_singletons", "Hide tokens with only 1 sample", value = TRUE),
                    helpText("For each group, choose one or more tokens. ",
                             "A sample is assigned to that group if its name contains ANY of those tokens. ",
                             "If multiple groups match, the top-most group wins."),
@@ -154,7 +141,6 @@ ui <- fluidPage(
                                      style = "font-size:16px; color:#000000; font-weight:600; margin-bottom:8px;"
                                    ),
                                    fluidRow(
-                                     # column(6, selectInput("bulk_group", "Set selected rows to group", choices = NULL)),
                                      column(
                                        6,
                                        selectInput(
@@ -192,21 +178,6 @@ server <- function(input, output, session){
     readr::read_csv(input$expression_dataframe$datapath, show_col_types = FALSE)
   })
   
-  # sample_choices <- reactive({
-  #   req(raw_df())
-  #   df <- raw_df()
-  #   id_cols  <- input$id_cols %||% infer_id_cols(df)
-  #   num_cols <- numeric_sample_cols(df, id_cols)
-  #   
-  #   # If we have numeric non-ID columns, use those;
-  #   # otherwise, fall back to all non-ID columns.
-  #   if (length(num_cols)) {
-  #     num_cols
-  #   } else {
-  #     setdiff(names(df), id_cols)
-  #   }
-  # })
-  
   sample_choices <- reactive({
     req(raw_df())
     df <- raw_df()
@@ -215,6 +186,25 @@ server <- function(input, output, session){
     start <- max(1, min(start, ncol(df)))  # clamp
     
     names(df)[start:ncol(df)]
+  })
+  
+  token_delim_regex <- reactive({
+    delims <- input$token_delims %||% c("_", "-")
+    delims <- unique(delims)
+    
+    # If user unchecks everything, fall back to underscore+dash to avoid breaking
+    if (!length(delims)) delims <- c("_", "-")
+    
+    # Escape for regex character class: -, ], \ need escaping; also handle dot/space
+    escape_for_class <- function(x) {
+      x <- gsub("\\\\", "\\\\\\\\", x)  # "\" -> "\\"
+      x <- gsub("\\]", "\\\\]", x)
+      x <- gsub("\\-", "\\\\-", x)
+      x
+    }
+    
+    cls <- paste0(vapply(delims, escape_for_class, character(1)), collapse = "")
+    paste0("[", cls, "]+")
   })
   
   output$data_start_preview <- renderUI({
@@ -255,58 +245,6 @@ server <- function(input, output, session){
   })
   
   # ---- ID columns ----
-  # output$id_col_detect <- renderUI({
-  #   req(raw_df())
-  #   df  <- raw_df()
-  #   ids <- infer_id_cols(df)
-  #   if (!length(ids)) {
-  #     div(style = "margin-top:-10px;",
-  #         helpText("No explicit gene ID columns detected. That's ok."))
-  #   } else {
-  #     checkboxGroupInput(
-  #       "id_cols",
-  #       "Detected gene ID columns (optional):",
-  #       choices = ids,
-  #       selected = ids
-  #     )
-  #   }
-  # })
-  
-  # ---- Sample columns ----
-  # output$sample_picker <- renderUI({
-  #   choices <- sample_choices()
-  #   selectizeInput(
-  #     "sample_cols", "Sample columns",
-  #     choices = choices,
-  #     selected = choices,
-  #     multiple = TRUE,
-  #     options = list(plugins = list("remove_button"))
-  #   )
-  # })
-  
-  # output$unassigned_cols <- renderUI({
-  #   all_choices <- sample_choices()
-  #   
-  #   # What is currently selected in the widget?
-  #   selected <- input$sample_cols
-  #   if (is.null(selected)) {
-  #     # Before the user touches anything, everything is "assigned"
-  #     selected <- all_choices
-  #   }
-  #   
-  #   unused <- setdiff(all_choices, selected)
-  #   
-  #   if (!length(unused)) {
-  #     return(NULL)  # don't show the box if nothing is unassigned
-  #   }
-  #   
-  #   tagList(
-  #     tags$b("Unassigned columns"),
-  #     tags$ul(
-  #       lapply(unused, function(x) tags$li(x))
-  #     )
-  #   )
-  # })
   
   # ---- Groups: names & colors ----
   
@@ -333,33 +271,6 @@ server <- function(input, output, session){
   }, ignoreInit = TRUE)
   
   # UI for group names/colors
-  # output$group_name_color_ui <- renderUI({
-  #   df <- groups_rv()
-  #   req(nrow(df) > 0)
-  #   tagList(
-  #     lapply(seq_len(nrow(df)), function(i){
-  #       fluidRow(
-  #         column(
-  #           8,
-  #           textInput(
-  #             paste0("grp_name_", i),
-  #             label = paste("Group", i, "name"),
-  #             value = df$Group[i]
-  #           )
-  #         ),
-  #         column(
-  #           4,
-  #           colourInput(
-  #             paste0("grp_col_", i),
-  #             label = "Color",
-  #             value = df$Color[i],
-  #             showColour = "both"
-  #           )
-  #         )
-  #       )
-  #     })
-  #   )
-  # })
   output$group_name_color_ui <- renderUI({
     ng <- input$n_groups %||% 1
     req(ng >= 1)
@@ -441,7 +352,8 @@ server <- function(input, output, session){
     df <- assign_df()
     req(nrow(df) > 0)
     
-    del <- input$token_delim %||% "[_\\.-]+"
+    # del <- input$token_delim %||% "[_\\.-]+"
+    del <- token_delim_regex()
     
     toks_list <- str_split(df$Sample, pattern = del)
     
@@ -454,41 +366,16 @@ server <- function(input, output, session){
     
     tab <- table(toks)
     
-    if (isTRUE(input$token_drop_singletons)) {
-      keep <- names(tab)[tab > 1]
-    } else {
-      keep <- names(tab)
-    }
-    
+    # if (isTRUE(input$token_drop_singletons)) {
+    #   keep <- names(tab)[tab > 1]
+    # } else {
+    #   keep <- names(tab)
+    # }
+    keep <- names(tab)
     sort(keep)
   })
   
   # Initialize assign_df when samples change
-  # observe({
-  #   req(raw_df())
-  #   samples <- input$sample_cols
-  #   req(length(samples) > 0)
-  #   df <- tibble(
-  #     Sample = samples,
-  #     Group  = NA_character_,
-  #     Color  = NA_character_
-  #   )
-  #   assign_df(df)
-  #   updateSelectInput(session, "bulk_group", choices = groups_rv()$Group)
-  # })
-  
-  # observe({
-  #   req(raw_df())
-  #   samples <- sample_choices()               # <- auto-detected numeric sample columns
-  #   req(length(samples) > 0)
-  #   df <- tibble(
-  #     Sample = samples,
-  #     Group  = NA_character_,
-  #     Color  = NA_character_
-  #   )
-  #   assign_df(df)
-  #   updateSelectInput(session, "bulk_group", choices = groups_rv()$Group)
-  # })
   observe({
     req(raw_df())
     samples <- sample_choices(); req(length(samples) > 0)
@@ -534,46 +421,63 @@ server <- function(input, output, session){
     HTML(txt)
   })
   
+  # observeEvent(assign_df(), {
+  #   df <- assign_df()
+  #   if (nrow(df) == 0) return()
+  #   s <- paste(df$Sample, collapse = " ")
+  #   guess <- if (grepl("_", s)) {
+  #     "[-_]+"
+  #   } else if (grepl("-", s)) {
+  #     "[-]+"
+  #   } else if (grepl("\\.", s)) {
+  #     "[.]+"
+  #   } else {
+  #     "[-_.]+"
+  #   }
+  #   cur <- input$token_delim
+  #   if (is.null(cur) || cur == "" || cur == "[-_.]+") {
+  #     updateTextInput(session, "token_delim", value = guess)
+  #   }
+  # }, ignoreInit = TRUE)
+  # 
+  # # ---- Tokenization table ----
+  # 
+  # tokens_tbl <- reactive({
+  #   df <- assign_df()
+  #   req(nrow(df) > 0)
+  #   
+  #   # del <- input$token_delim %||% "[-_.]+"
+  #   del <- token_delim_regex()
+  #   
+  #   splits <- str_split(df$Sample, pattern = del)
+  #   max_tokens <- max(lengths(splits))
+  #   
+  #   padded <- lapply(splits, function(v){
+  #     length(v) <- max_tokens
+  #     v
+  #   })
+  #   mat <- do.call(rbind, padded)
+  #   
+  #   out <- as_tibble(mat, .name_repair = ~ paste0("T", seq_along(.)))
+  #   out$Sample <- df$Sample
+  #   out
+  # })
+  
   observeEvent(assign_df(), {
     df <- assign_df()
     if (nrow(df) == 0) return()
+    
     s <- paste(df$Sample, collapse = " ")
-    guess <- if (grepl("_", s)) {
-      "[-_]+"
-    } else if (grepl("-", s)) {
-      "[-]+"
-    } else if (grepl("\\.", s)) {
-      "[.]+"
-    } else {
-      "[-_.]+"
-    }
-    cur <- input$token_delim
-    if (is.null(cur) || cur == "" || cur == "[-_.]+") {
-      updateTextInput(session, "token_delim", value = guess)
-    }
+    guess <- character(0)
+    if (grepl("_", s)) guess <- c(guess, "_")
+    if (grepl("-", s)) guess <- c(guess, "-")
+    if (grepl("\\.", s)) guess <- c(guess, ".")
+    if (grepl(" ", s)) guess <- c(guess, " ")
+    
+    if (!length(guess)) guess <- c("_", "-")
+    
+    updateCheckboxGroupInput(session, "token_delims", selected = unique(guess))
   }, ignoreInit = TRUE)
-  
-  # ---- Tokenization table ----
-  
-  tokens_tbl <- reactive({
-    df <- assign_df()
-    req(nrow(df) > 0)
-    
-    del <- input$token_delim %||% "[-_.]+"
-    
-    splits <- str_split(df$Sample, pattern = del)
-    max_tokens <- max(lengths(splits))
-    
-    padded <- lapply(splits, function(v){
-      length(v) <- max_tokens
-      v
-    })
-    mat <- do.call(rbind, padded)
-    
-    out <- as_tibble(mat, .name_repair = ~ paste0("T", seq_along(.)))
-    out$Sample <- df$Sample
-    out
-  })
   
   # Token position selector
   output$token_dims_ui <- renderUI({
@@ -619,8 +523,8 @@ server <- function(input, output, session){
     grps <- groups_rv()
     req(nrow(grps) > 0)
     
-    del <- input$token_delim %||% "[_\\.-]+"
-    
+    # del <- input$token_delim %||% "[_\\.-]+"
+    del <- token_delim_regex()
     # Split sample names into tokens once
     toks_list <- str_split(df$Sample, pattern = del)
     sample_tokens <- lapply(toks_list, function(v) {
@@ -720,28 +624,6 @@ server <- function(input, output, session){
   }, server = FALSE)
   
   # Bulk apply
-  # observeEvent(input$apply_bulk, {
-  #   rows <- input$assign_dt_rows_selected
-  #   grp  <- input$bulk_group
-  #   req(length(rows) >= 1, !is.null(grp), nzchar(grp))
-  #   
-  #   df <- assign_df()
-  #   req(nrow(df) > 0)
-  #   
-  #   df$Group[rows] <- grp
-  #   
-  #   df <- df %>%
-  #     left_join(groups_rv(), by = "Group") %>%
-  #     transmute(
-  #       Sample,
-  #       Group,
-  #       Color = ifelse(!is.na(Color.y) & nzchar(Color.y),
-  #                      Color.y,
-  #                      Color.x)
-  #     )
-  #   
-  #   assign_df(df)
-  # })
   observeEvent(input$apply_bulk, {
     rows <- input$assign_dt_rows_selected
     grp  <- input$bulk_group
@@ -772,73 +654,7 @@ server <- function(input, output, session){
     assign_df(df)
   })
   
-  # ---- Visualization preview ----
-  
-  # expr_long <- reactive({
-  #   df <- raw_df()
-  #   req(df)
-  #   
-  #   id_cols  <- input$id_cols %||% infer_id_cols(df)
-  #   samples  <- input$sample_cols
-  #   req(length(samples) > 0)
-  #   
-  #   keep_cols <- unique(c(id_cols, samples))
-  #   df <- df[, keep_cols, drop = FALSE]
-  #   
-  #   gene_col <- intersect(
-  #     c("Gene_Symbol", "GeneSymbol", "Symbol", "gene", "Gene"),
-  #     names(df)
-  #   )[1]
-  #   if (is.na(gene_col)) {
-  #     gene_col <- intersect(
-  #       c("EnsemblID", "ensembl_gene_id", "ensembl_id"),
-  #       names(df)
-  #     )[1]
-  #   }
-  #   
-  #   df_long <- df %>%
-  #     pivot_longer(
-  #       cols = all_of(samples),
-  #       names_to  = "Sample",
-  #       values_to = "Count"
-  #     )
-  #   
-  #   df_long$Gene <- if (!is.na(gene_col)) df_long[[gene_col]] else seq_len(nrow(df_long))
-  #   
-  #   df_long
-  # })
-  
-  # expr_long <- reactive({
-  #   df <- raw_df(); req(df)
-  #   
-  #   id_cols  <- input$id_cols %||% infer_id_cols(df)
-  #   samples  <- sample_choices()               # <- use auto columns
-  #   req(length(samples) > 0)
-  #   
-  #   keep_cols <- unique(c(id_cols, samples))
-  #   df <- df[, keep_cols, drop = FALSE]
-  #   
-  #   gene_col <- intersect(
-  #     c("Gene_Symbol", "GeneSymbol", "Symbol", "gene", "Gene"),
-  #     names(df)
-  #   )[1]
-  #   if (is.na(gene_col)) {
-  #     gene_col <- intersect(
-  #       c("EnsemblID", "ensembl_gene_id", "ensembl_id"),
-  #       names(df)
-  #     )[1]
-  #   }
-  #   
-  #   df_long <- df %>%
-  #     tidyr::pivot_longer(
-  #       cols = dplyr::all_of(samples),
-  #       names_to  = "Sample",
-  #       values_to = "Count"
-  #     )
-  #   
-  #   df_long$Gene <- if (!is.na(gene_col)) df_long[[gene_col]] else seq_len(nrow(df_long))
-  #   df_long
-  # })
+  # ---- Visualization preview ---
   
   expr_long <- reactive({
     df <- raw_df(); req(df)
@@ -1080,36 +896,6 @@ server <- function(input, output, session){
       readr::write_csv(out, file)
     }
   )
-  
-  # output$download_groupfile <- downloadHandler(
-  #   filename = function() {
-  #     paste0("groupfile_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".csv")
-  #   },
-  #   content = function(file) {
-  #     df <- final_group_df()
-  #     req(nrow(df) > 0)
-  #     
-  #     if (any(is.na(df$Group) | df$Group == "")) {
-  #       showModal(modalDialog(
-  #         title = "Unassigned samples",
-  #         "Some samples do not have a Group yet. Please assign all samples before downloading.",
-  #         easyClose = TRUE
-  #       ))
-  #       return()
-  #     }
-  #     
-  #     if (any(is.na(df$Color) | df$Color == "")) {
-  #       showModal(modalDialog(
-  #         title = "Missing colors",
-  #         "Some groups do not have a Color defined. Please set colors for all groups before downloading.",
-  #         easyClose = TRUE
-  #       ))
-  #       return()
-  #     }
-  #     
-  #     readr::write_csv(df, file)
-  #   }
-  # )
 }
 
 shinyApp(
