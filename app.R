@@ -105,9 +105,25 @@ ui <- fluidPage(
                      selected = c("_", "-")   # sensible default
                    ),
                    # checkboxInput("token_drop_singletons", "Hide tokens with only 1 sample", value = TRUE),
-                   helpText("For each group, choose one or more tokens. ",
-                            "A sample is assigned to that group if its name contains ANY of those tokens. ",
-                            "If multiple groups match, the top-most group wins."),
+                   # helpText("For each group, choose one or more tokens. ",
+                   #          "A sample is assigned to that group if its column name contains ALL of the selected tokens. ",
+                   #          "If multiple groups match a token set, the top-most group wins."),
+                   tags$div(
+                     style = "font-size:16px; line-height:1.35; padding:10px 12px; background:#f7f7f7; border:1px solid #e5e5e5; border-radius:10px; margin:8px 0;",
+                     tags$b("How token grouping works (AND vs OR):"),
+                     tags$ul(
+                       style = "margin:8px 0 0 18px;",
+                       tags$li(tags$b("All tokens (AND): "), "A sample is assigned to this group only if it contains ", tags$u("every"), " selected token. ",
+                               tags$span(style="color:#333;", "Example: tokens = CD11c + C8 + O → sample must include all three.")),
+                       tags$li(tags$b("Any token (OR): "), "A sample is assigned to this group if it contains ", tags$u("at least one"), " selected token. ",
+                               tags$span(style="color:#333;", "Example: tokens = MRL or SLE → sample can include either token."))
+                     ),
+                     tags$div(
+                       style = "margin-top:8px;",
+                       tags$b("If multiple groups match: "),
+                       "the app chooses the most specific rule (AND with more tokens wins). If still tied, the top-most group wins."
+                     )
+                   ),
                    uiOutput("token_group_selectors"),
                    actionButton("apply_token", "Apply token grouping")
                  ),
@@ -170,7 +186,9 @@ server <- function(input, output, session){
   
   UNASSIGNED_SENTINEL <- "<UNASSIGNED>"
   
-  grp_tokens_rv <- reactiveVal(list())  # named list: GroupName -> character vector of tokens
+  # grp_tokens_rv <- reactiveVal(list())  # named list: GroupName -> character vector of tokens
+  grp_rule_rv <- reactiveVal(list())
+  # structure: list("Group 1" = list(tokens = c("MRL","SLE"), mode="any"), ...)
   
   # ---- Data load ----
   raw_df <- reactive({
@@ -343,28 +361,56 @@ server <- function(input, output, session){
   })
   
   # stash the token collectors
+  # observe({
+  #   grps <- groups_rv()
+  #   req(nrow(grps) > 0)
+  #   
+  #   cur <- grp_tokens_rv()
+  #   
+  #   for (i in seq_len(nrow(grps))) {
+  #     gname <- grps$Group[i]
+  #     sel <- input[[paste0("grp_tokens_", i)]]
+  #     if (!is.null(sel)) cur[[gname]] <- sel
+  #   }
+  #   
+  #   grp_tokens_rv(cur)
+  # })
   observe({
     grps <- groups_rv()
     req(nrow(grps) > 0)
     
-    cur <- grp_tokens_rv()
+    cur <- grp_rule_rv()
     
     for (i in seq_len(nrow(grps))) {
       gname <- grps$Group[i]
-      sel <- input[[paste0("grp_tokens_", i)]]
-      if (!is.null(sel)) cur[[gname]] <- sel
+      
+      toks <- input[[paste0("grp_tokens_", i)]]
+      md   <- input[[paste0("grp_mode_",   i)]]
+      
+      if (!is.null(toks) || !is.null(md)) {
+        cur[[gname]] <- list(
+          tokens = toks %||% (cur[[gname]]$tokens %||% character(0)),
+          mode   = md   %||% (cur[[gname]]$mode   %||% "all")
+        )
+      }
     }
     
-    grp_tokens_rv(cur)
+    grp_rule_rv(cur)
   })
   
   # when tokens are deselected remove from the stash so that the UI updates accordingly
+  # observeEvent(groups_rv(), {
+  #   grps <- groups_rv()$Group
+  #   cur  <- grp_tokens_rv()
+  #   
+  #   cur <- cur[names(cur) %in% grps]
+  #   grp_tokens_rv(cur)
+  # }, ignoreInit = TRUE)
   observeEvent(groups_rv(), {
     grps <- groups_rv()$Group
-    cur  <- grp_tokens_rv()
-    
-    cur <- cur[names(cur) %in% grps]
-    grp_tokens_rv(cur)
+    cur  <- grp_rule_rv()
+    cur  <- cur[names(cur) %in% grps]
+    grp_rule_rv(cur)
   }, ignoreInit = TRUE)
   
   # ---- Assignment table state ----
@@ -412,26 +458,26 @@ server <- function(input, output, session){
     )
   })
   
-  observeEvent(groups_rv(), {
-    df <- assign_df()
-    if (!nrow(df)) return()
-    
-    valid_groups <- groups_rv()$Group
-    
-    # unassign anything pointing to removed groups
-    df$Group[!is.na(df$Group) & !(df$Group %in% valid_groups)] <- NA_character_
-    
-    # refresh colors from current group defs
-    cmap <- setNames(groups_rv()$Color, groups_rv()$Group)
-    df$Color <- ifelse(is.na(df$Group), NA_character_, unname(cmap[df$Group]))
-    
-    assign_df(df)
-    
-    updateSelectInput(
-      session, "bulk_group",
-      choices = c("(Unassigned)" = UNASSIGNED_SENTINEL, valid_groups)
-    )
-  }, ignoreInit = TRUE)
+  # observeEvent(groups_rv(), {
+  #   df <- assign_df()
+  #   if (!nrow(df)) return()
+  #   
+  #   valid_groups <- groups_rv()$Group
+  #   
+  #   # unassign anything pointing to removed groups
+  #   df$Group[!is.na(df$Group) & !(df$Group %in% valid_groups)] <- NA_character_
+  #   
+  #   # refresh colors from current group defs
+  #   cmap <- setNames(groups_rv()$Color, groups_rv()$Group)
+  #   df$Color <- ifelse(is.na(df$Group), NA_character_, unname(cmap[df$Group]))
+  #   
+  #   assign_df(df)
+  #   
+  #   updateSelectInput(
+  #     session, "bulk_group",
+  #     choices = c("(Unassigned)" = UNASSIGNED_SENTINEL, valid_groups)
+  #   )
+  # }, ignoreInit = TRUE)
   
   
   
@@ -562,17 +608,68 @@ server <- function(input, output, session){
     # if multiple groups match, first (top-most) group wins.
     assigned_group <- rep(NA_character_, length(sample_tokens))
     
-    for (g in names(grp_tokens)) {
-      toks <- grp_tokens[[g]]
-      if (!length(toks)) next
+    # for (g in names(grp_tokens)) {
+    #   toks <- grp_tokens[[g]]
+    #   if (!length(toks)) next
+    #   
+    #   hit <- vapply(sample_tokens, function(st) {
+    #     any(toks %in% st)
+    #   }, logical(1))
+    #   
+    #   assignable <- is.na(assigned_group) & hit
+    #   assigned_group[assignable] <- g
+    # }
+    grp_order <- grps$Group  # preserves UI order
+    # tok_n <- vapply(grp_order, function(g) length(grp_tokens[[g]] %||% character(0)), integer(1))
+    # names(tok_n) <- grp_order
+    # 
+    # assigned_group <- vapply(sample_tokens, function(st) {
+    #   # which groups match (ALL selected tokens must be present)
+    #   hits <- vapply(grp_order, function(g) {
+    #     toks <- grp_tokens[[g]] %||% character(0)
+    #     length(toks) > 0 && all(toks %in% st)
+    #   }, logical(1))
+    #   
+    #   if (!any(hits)) return(NA_character_)
+    #   
+    #   candidates <- grp_order[hits]
+    #   
+    #   # choose the most specific (largest token set); tie -> first in UI order
+    #   best_n <- max(tok_n[candidates])
+    #   candidates[tok_n[candidates] == best_n][1]
+    # }, character(1))
+    # capture rules per group in UI order
+    grp_rules <- lapply(seq_len(nrow(grps)), function(i) {
+      gname <- grps$Group[i]
+      list(
+        name   = gname,
+        tokens = (input[[paste0("grp_tokens_", i)]] %||% character(0)) |> unique(),
+        mode   = input[[paste0("grp_mode_",   i)]] %||% "all"
+      )
+    })
+    names(grp_rules) <- grp_order
+    
+    assigned_group <- vapply(sample_tokens, function(st) {
+      scores <- vapply(grp_order, function(g) {
+        toks <- grp_rules[[g]]$tokens
+        md   <- grp_rules[[g]]$mode
+        
+        if (!length(toks)) return(-Inf)
+        
+        hit <- if (identical(md, "any")) any(toks %in% st) else all(toks %in% st)
+        if (!hit) return(-Inf)
+        
+        # scoring: prefer AND-groups (more specific), then by number of tokens / matches
+        if (identical(md, "all")) {
+          1000 + length(toks)
+        } else {
+          sum(toks %in% st)  # "any" groups: more matched tokens = stronger match
+        }
+      }, numeric(1))
       
-      hit <- vapply(sample_tokens, function(st) {
-        any(toks %in% st)
-      }, logical(1))
-      
-      assignable <- is.na(assigned_group) & hit
-      assigned_group[assignable] <- g
-    }
+      if (all(!is.finite(scores))) return(NA_character_)
+      grp_order[which.max(scores)]  # tie breaks by UI order because which.max picks first
+    }, character(1))
     
     # Apply to df
     df$Group <- assigned_group
@@ -868,6 +965,37 @@ server <- function(input, output, session){
   # })
   
   # grab tokens from the stash created earlier
+  # output$token_group_selectors <- renderUI({
+  #   req(input$group_mode == "token")
+  #   choices <- token_choices()
+  #   req(length(choices) > 0)
+  #   
+  #   grps <- groups_rv()
+  #   req(nrow(grps) > 0)
+  #   
+  #   saved <- isolate(grp_tokens_rv())
+  #   
+  #   tagList(
+  #     lapply(seq_len(nrow(grps)), function(i) {
+  #       gname <- grps$Group[i]
+  #       pre   <- saved[[gname]] %||% character(0)
+  #       
+  #       div(
+  #         tags$b(gname),
+  #         selectizeInput(
+  #           inputId = paste0("grp_tokens_", i),
+  #           label = NULL,
+  #           choices = choices,
+  #           selected = pre,
+  #           multiple = TRUE,
+  #           options = list(plugins = list("remove_button"),
+  #                          placeholder = "Select tokens for this group")
+  #         ),
+  #         tags$hr(style = "margin:4px 0;")
+  #       )
+  #     })
+  #   )
+  # })
   output$token_group_selectors <- renderUI({
     req(input$group_mode == "token")
     choices <- token_choices()
@@ -876,24 +1004,35 @@ server <- function(input, output, session){
     grps <- groups_rv()
     req(nrow(grps) > 0)
     
-    saved <- isolate(grp_tokens_rv())
+    saved <- isolate(grp_rule_rv())
     
     tagList(
       lapply(seq_len(nrow(grps)), function(i) {
         gname <- grps$Group[i]
-        pre   <- saved[[gname]] %||% character(0)
+        pre_tokens <- saved[[gname]]$tokens %||% character(0)
+        pre_mode   <- saved[[gname]]$mode   %||% "all"
         
         div(
           tags$b(gname),
+          
+          radioButtons(
+            inputId = paste0("grp_mode_", i),
+            label   = NULL,
+            choices = c("All tokens (AND)" = "all", "Any token (OR)" = "any"),
+            selected = pre_mode,
+            inline = TRUE
+          ),
+          
           selectizeInput(
             inputId = paste0("grp_tokens_", i),
             label = NULL,
             choices = choices,
-            selected = pre,
+            selected = pre_tokens,
             multiple = TRUE,
             options = list(plugins = list("remove_button"),
                            placeholder = "Select tokens for this group")
           ),
+          
           tags$hr(style = "margin:4px 0;")
         )
       })
