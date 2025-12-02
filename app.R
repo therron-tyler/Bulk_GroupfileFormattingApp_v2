@@ -28,22 +28,6 @@ fallback_palette <- function(n){
   grDevices::hcl(h = hues, l = 65, c = 100)[1:n]
 }
 
-# infer_id_cols <- function(df){
-#   cand <- names(df)
-#   patt <- c(
-#     "^symbol$", "^gene_?symbol$", "^genesymbol$",
-#     "^ensembl(_?gene)?(_?id)?$", "^ensembl(\\.id)?$"
-#   )
-#   cand[sapply(cand, function(nm){
-#     any(grepl(paste(patt, collapse = "|"), nm, ignore.case = TRUE))
-#   })]
-# }
-# 
-# numeric_sample_cols <- function(df, id_cols){
-#   nums <- names(df)[vapply(df, is.numeric, logical(1))]
-#   setdiff(nums, id_cols)
-# }
-
 # ----------------------- UI ----------------------- #
 
 ui <- fluidPage(
@@ -88,7 +72,7 @@ ui <- fluidPage(
                    min = 1,
                    step = 1
                  ),
-                 
+                 helpText("Numbered Column Preview from Data File: "),
                  uiOutput("data_start_preview"),
                  
                  tags$hr(),
@@ -129,7 +113,21 @@ ui <- fluidPage(
                  ),
                  
                  tags$hr(),
-                 downloadButton("download_groupfile", "Download groupfile (Sample,Group,Color)")
+                 # downloadButton("download_groupfile", "Download groupfile (Sample,Group,Color)")
+                 fluidRow(
+                   column(
+                     7,
+                     downloadButton("download_groupfile", "Download groupfile (Sample,Group,Color)", width = "100%")
+                   ),
+                   column(
+                     5,
+                     textInput(
+                       "groupfile_name",
+                       label = NULL,
+                       placeholder = "Optional filename (no .csv needed)"
+                     )
+                   )
+                 )
     ),
     
     mainPanel(width = 8,
@@ -171,6 +169,8 @@ ui <- fluidPage(
 server <- function(input, output, session){
   
   UNASSIGNED_SENTINEL <- "<UNASSIGNED>"
+  
+  grp_tokens_rv <- reactiveVal(list())  # named list: GroupName -> character vector of tokens
   
   # ---- Data load ----
   raw_df <- reactive({
@@ -342,6 +342,31 @@ server <- function(input, output, session){
     }
   })
   
+  # stash the token collectors
+  observe({
+    grps <- groups_rv()
+    req(nrow(grps) > 0)
+    
+    cur <- grp_tokens_rv()
+    
+    for (i in seq_len(nrow(grps))) {
+      gname <- grps$Group[i]
+      sel <- input[[paste0("grp_tokens_", i)]]
+      if (!is.null(sel)) cur[[gname]] <- sel
+    }
+    
+    grp_tokens_rv(cur)
+  })
+  
+  # when tokens are deselected remove from the stash so that the UI updates accordingly
+  observeEvent(groups_rv(), {
+    grps <- groups_rv()$Group
+    cur  <- grp_tokens_rv()
+    
+    cur <- cur[names(cur) %in% grps]
+    grp_tokens_rv(cur)
+  }, ignoreInit = TRUE)
+  
   # ---- Assignment table state ----
   
   assign_df <- reactiveVal(
@@ -387,6 +412,29 @@ server <- function(input, output, session){
     )
   })
   
+  observeEvent(groups_rv(), {
+    df <- assign_df()
+    if (!nrow(df)) return()
+    
+    valid_groups <- groups_rv()$Group
+    
+    # unassign anything pointing to removed groups
+    df$Group[!is.na(df$Group) & !(df$Group %in% valid_groups)] <- NA_character_
+    
+    # refresh colors from current group defs
+    cmap <- setNames(groups_rv()$Color, groups_rv()$Group)
+    df$Color <- ifelse(is.na(df$Group), NA_character_, unname(cmap[df$Group]))
+    
+    assign_df(df)
+    
+    updateSelectInput(
+      session, "bulk_group",
+      choices = c("(Unassigned)" = UNASSIGNED_SENTINEL, valid_groups)
+    )
+  }, ignoreInit = TRUE)
+  
+  
+  
   # Final mapping used for viz/download
   final_group_df <- reactive({
     df <- assign_df()
@@ -421,49 +469,9 @@ server <- function(input, output, session){
     HTML(txt)
   })
   
-  # observeEvent(assign_df(), {
-  #   df <- assign_df()
-  #   if (nrow(df) == 0) return()
-  #   s <- paste(df$Sample, collapse = " ")
-  #   guess <- if (grepl("_", s)) {
-  #     "[-_]+"
-  #   } else if (grepl("-", s)) {
-  #     "[-]+"
-  #   } else if (grepl("\\.", s)) {
-  #     "[.]+"
-  #   } else {
-  #     "[-_.]+"
-  #   }
-  #   cur <- input$token_delim
-  #   if (is.null(cur) || cur == "" || cur == "[-_.]+") {
-  #     updateTextInput(session, "token_delim", value = guess)
-  #   }
-  # }, ignoreInit = TRUE)
-  # 
-  # # ---- Tokenization table ----
-  # 
-  # tokens_tbl <- reactive({
-  #   df <- assign_df()
-  #   req(nrow(df) > 0)
-  #   
-  #   # del <- input$token_delim %||% "[-_.]+"
-  #   del <- token_delim_regex()
-  #   
-  #   splits <- str_split(df$Sample, pattern = del)
-  #   max_tokens <- max(lengths(splits))
-  #   
-  #   padded <- lapply(splits, function(v){
-  #     length(v) <- max_tokens
-  #     v
-  #   })
-  #   mat <- do.call(rbind, padded)
-  #   
-  #   out <- as_tibble(mat, .name_repair = ~ paste0("T", seq_along(.)))
-  #   out$Sample <- df$Sample
-  #   out
-  # })
-  
   observeEvent(assign_df(), {
+    if (!is.null(input$token_delims) && length(input$token_delims)) return()
+    
     df <- assign_df()
     if (nrow(df) == 0) return()
     
@@ -831,6 +839,35 @@ server <- function(input, output, session){
       )
   })
 
+  # output$token_group_selectors <- renderUI({
+  #   req(input$group_mode == "token")
+  #   choices <- token_choices()
+  #   req(length(choices) > 0)
+  #   
+  #   grps <- groups_rv()
+  #   req(nrow(grps) > 0)
+  #   
+  #   tagList(
+  #     lapply(seq_len(nrow(grps)), function(i) {
+  #       div(
+  #         tags$b(grps$Group[i]),
+  #         selectizeInput(
+  #           inputId = paste0("grp_tokens_", i),
+  #           label   = NULL,
+  #           choices = choices,
+  #           multiple = TRUE,
+  #           options = list(
+  #             plugins = list("remove_button"),
+  #             placeholder = "Select tokens for this group"
+  #           )
+  #         ),
+  #         tags$hr(style = "margin:4px 0;")
+  #       )
+  #     })
+  #   )
+  # })
+  
+  # grab tokens from the stash created earlier
   output$token_group_selectors <- renderUI({
     req(input$group_mode == "token")
     choices <- token_choices()
@@ -839,19 +876,23 @@ server <- function(input, output, session){
     grps <- groups_rv()
     req(nrow(grps) > 0)
     
+    saved <- isolate(grp_tokens_rv())
+    
     tagList(
       lapply(seq_len(nrow(grps)), function(i) {
+        gname <- grps$Group[i]
+        pre   <- saved[[gname]] %||% character(0)
+        
         div(
-          tags$b(grps$Group[i]),
+          tags$b(gname),
           selectizeInput(
             inputId = paste0("grp_tokens_", i),
-            label   = NULL,
+            label = NULL,
             choices = choices,
+            selected = pre,
             multiple = TRUE,
-            options = list(
-              plugins = list("remove_button"),
-              placeholder = "Select tokens for this group"
-            )
+            options = list(plugins = list("remove_button"),
+                           placeholder = "Select tokens for this group")
           ),
           tags$hr(style = "margin:4px 0;")
         )
@@ -867,8 +908,25 @@ server <- function(input, output, session){
   }
   
   output$download_groupfile <- downloadHandler(
+    # filename = function() {
+    #   paste0("groupfile_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".csv")
+    # },
     filename = function() {
-      paste0("groupfile_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".csv")
+      nm <- input$groupfile_name %||% ""
+      nm <- trimws(nm)
+      
+      # if blank, keep your timestamp default
+      if (!nzchar(nm)) {
+        return(paste0("groupfile_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".csv"))
+      }
+      
+      # sanitize: keep letters, numbers, underscore, dash, dot; convert spaces to _
+      nm <- gsub("\\s+", "_", nm)
+      nm <- gsub("[^A-Za-z0-9._-]", "", nm)
+      
+      # ensure .csv
+      if (!grepl("\\.csv$", nm, ignore.case = TRUE)) nm <- paste0(nm, ".csv")
+      nm
     },
     content = function(file) {
       df <- assign_df(); req(nrow(df) > 0)
